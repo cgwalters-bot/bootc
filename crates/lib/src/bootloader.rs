@@ -11,13 +11,11 @@ use bootc_mount as mount;
 #[cfg(any(feature = "composefs-backend", feature = "install-to-disk"))]
 use bootc_mount::tempmount::TempMount;
 
-use crate::utils;
+use crate::{discoverable_partition_specification, utils};
 
 /// The name of the mountpoint for efi (as a subdirectory of /boot, or at the toplevel)
 pub(crate) const EFI_DIR: &str = "efi";
 /// The EFI system partition GUID
-#[allow(dead_code)]
-pub(crate) const ESP_GUID: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 /// Path to the bootupd update payload
 #[allow(dead_code)]
 const BOOTUPD_UPDATES: &str = "usr/lib/bootupd/updates";
@@ -27,7 +25,7 @@ pub(crate) fn esp_in(device: &PartitionTable) -> Result<&Partition> {
     device
         .partitions
         .iter()
-        .find(|p| p.parttype.as_str() == ESP_GUID)
+        .find(|p| p.parttype.as_str() == discoverable_partition_specification::ESP)
         .ok_or(anyhow::anyhow!("ESP not found in partition table"))
 }
 
@@ -87,7 +85,7 @@ pub(crate) fn install_systemd_boot(
     let esp_part = device
         .partitions
         .iter()
-        .find(|p| p.parttype.as_str() == ESP_GUID)
+        .find(|p| p.parttype.as_str() == discoverable_partition_specification::ESP)
         .ok_or_else(|| anyhow::anyhow!("ESP partition not found"))?;
 
     let esp_mount = TempMount::mount_dev(&esp_part.node).context("Mounting ESP")?;
