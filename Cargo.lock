@@ -252,6 +252,7 @@ dependencies = [
  "bootc-internal-utils",
  "bootc-lib",
  "log",
+ "rustix",
  "tokio",
  "tracing",
 ]
