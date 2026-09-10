@@ -526,6 +526,49 @@ jobs:
           echo "BOOTC_boot_type=${{ matrix.boot_type }}" >> $GITHUB_ENV
           echo "BOOTC_seal_state=${{ matrix.seal_state }}" >> $GITHUB_ENV
 
+      - name: Capture Ubuntu 26 host security metadata
+        if: needs.compute-ci-level.outputs.fork_mode == 'true'
+        run: |
+          set -u
+          diagnostics="$RUNNER_TEMP/bootc-host-security"
+          mkdir -p "$diagnostics"
+          date -u -Iseconds > "$diagnostics/job-start-utc.txt"
+          echo "BOOTC_CI_RETRIES=2" >> "$GITHUB_ENV"
+
+          {
+            printf '%s\n' '--- job start (UTC) ---'
+            cat "$diagnostics/job-start-utc.txt"
+            printf '%s\n' '--- os-release ---'
+            cat /usr/lib/os-release 2>&1 || true
+            printf '%s\n' '--- kernel ---'
+            uname -a 2>&1 || true
+            printf '%s\n' '--- podman security ---'
+            podman info --format '{{json .Host.Security}}' 2>&1 || true
+            printf '%s\n' '--- AppArmor restriction ---'
+            sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || true
+            printf '%s\n' '--- relevant packages ---'
+            dpkg-query -W apparmor apparmor-profiles bubblewrap 2>&1 || true
+            printf '%s\n' '--- loaded bwrap profiles ---'
+            sudo aa-status 2>&1 | grep -E '(^|/)(bwrap|unpriv_bwrap)( |$)' || true
+          } > "$diagnostics/host-security.txt"
+
+          profile_output="$diagnostics/bwrap-profile.txt"
+          : > "$profile_output"
+          profile_bytes=0
+          for profile in /etc/apparmor.d/*bwrap*; do
+            [ -f "$profile" ] || continue
+            [ "$profile_bytes" -lt 65536 ] || break
+            printf '\n--- %s ---\n' "$profile" >> "$profile_output"
+            profile_bytes=$(wc -c < "$profile_output")
+            [ "$profile_bytes" -lt 65536 ] || break
+            remaining=$((65536 - profile_bytes))
+            dd if="$profile" bs=1 count="$remaining" status=none >> "$profile_output" 2>/dev/null || true
+            profile_bytes=$(wc -c < "$profile_output")
+          done
+          if [ "$profile_bytes" -eq 0 ]; then
+            printf '%s\n' 'No /etc/apparmor.d/*bwrap* profile file found.' >> "$profile_output"
+          fi
+
       - name: Download package artifacts
         uses: actions/download-artifact@v8
         with:
@@ -584,6 +627,32 @@ jobs:
             ${{ matrix.seal_state }}-\
             ${{ env.ARCH }}"
           path: /var/tmp/tmt
+
+      - name: Collect Ubuntu 26 kernel AppArmor denials
+        if: ${{ always() && needs.compute-ci-level.outputs.fork_mode == 'true' }}
+        run: |
+          set -u
+          diagnostics="$RUNNER_TEMP/bootc-host-security"
+          mkdir -p "$diagnostics"
+          start_utc=$(cat "$diagnostics/job-start-utc.txt" 2>/dev/null || date -u -Iseconds)
+          {
+            printf '%s\n' "--- kernel AppArmor denials since $start_utc ---"
+            timeout 30s journalctl -k --since "$start_utc" --no-pager -o short-iso 2>/dev/null |
+              grep -E 'apparmor="DENIED".*(bwrap|unpriv_bwrap)|profile="(bwrap|unpriv_bwrap)"' |
+              dd bs=1 count=65400 status=none || true
+          } > "$diagnostics/apparmor-denials.log"
+
+      - name: Archive Ubuntu 26 host security diagnostics
+        if: ${{ always() && needs.compute-ci-level.outputs.fork_mode == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: "host-security-${{ matrix.test_os }}-${{ matrix.variant }}-${{ matrix.bootloader }}-${{ matrix.boot_type }}-${{ matrix.filesystem }}-${{ matrix.seal_state }}-${{ env.ARCH }}"
+          path: |
+            ${{ runner.temp }}/bootc-host-security/host-security.txt
+            ${{ runner.temp }}/bootc-host-security/apparmor-denials.log
+            ${{ runner.temp }}/bootc-host-security/bwrap-profile.txt
+          if-no-files-found: warn
+          retention-days: 7
 
   # Test the upgrade path: boot from published base image, upgrade to locally-built image,
   # then run readonly tests to verify the upgrade worked.
