@@ -19,7 +19,13 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]
   merge_group:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      ubuntu2604_fork_test:
+        description: Run the narrow Ubuntu 26.04 fork validation
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,7 +60,13 @@ jobs:
     outputs:
       package_os_matrix: ${{ steps.matrix.outputs.package_os_matrix }}
       integration_os_matrix: ${{ steps.matrix.outputs.integration_os_matrix }}
+      integration_variant_matrix: ${{ steps.matrix.outputs.integration_variant_matrix }}
+      integration_filesystem_matrix: ${{ steps.matrix.outputs.integration_filesystem_matrix }}
+      integration_bootloader_matrix: ${{ steps.matrix.outputs.integration_bootloader_matrix }}
+      integration_boot_type_matrix: ${{ steps.matrix.outputs.integration_boot_type_matrix }}
+      integration_seal_state_matrix: ${{ steps.matrix.outputs.integration_seal_state_matrix }}
       upgrade_os_matrix: ${{ steps.matrix.outputs.upgrade_os_matrix }}
+      fork_mode: ${{ steps.matrix.outputs.fork_mode }}
       run_heavy: ${{ steps.matrix.outputs.run_heavy }}
       merge_queue_enabled: ${{ steps.merge-queue.outputs.enabled }}
       docs_only: ${{ steps.docs-check.outputs.docs_only }}
@@ -95,6 +107,7 @@ jobs:
       # present only while a queue is actually configured for the branch.
       - name: Check for a merge_queue rule on main
         id: merge-queue
+        if: github.event_name != 'workflow_dispatch' || github.repository != 'cgwalters-bot/bootc' || inputs.ubuntu2604_fork_test != true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -115,40 +128,84 @@ jobs:
           EVENT='${{ github.event_name }}'
           MERGE_QUEUE_ENABLED='${{ steps.merge-queue.outputs.enabled }}'
           DOCS_ONLY='${{ steps.docs-check.outputs.docs_only }}'
+          REPOSITORY='${{ github.repository }}'
+          FORK_TEST='${{ inputs.ubuntu2604_fork_test || false }}'
+          FORK_MODE=false
 
-          if [[ "$DOCS_ONLY" != "true" ]] && { [[ "$EVENT" == "merge_group" || "$EVENT" == "workflow_dispatch" ]] \
+          if [[ "$EVENT" == "workflow_dispatch" && "$REPOSITORY" == "cgwalters-bot/bootc" && "$FORK_TEST" == "true" ]]; then
+            # Keep the fork validation focused on the PR's composefs sealed-UKI
+            # regression while still using the normal package/artifact path.
+            {
+              echo 'package_os_matrix=["centos-9"]'
+              echo 'integration_os_matrix=["centos-9"]'
+              echo 'integration_variant_matrix=["composefs"]'
+              echo 'integration_filesystem_matrix=["ext4"]'
+              echo 'integration_bootloader_matrix=["systemd"]'
+              echo 'integration_boot_type_matrix=["uki"]'
+              echo 'integration_seal_state_matrix=["sealed"]'
+              echo 'upgrade_os_matrix=[]'
+              echo 'run_heavy=true'
+            } >> "$GITHUB_OUTPUT"
+            FORK_MODE=true
+          elif [[ "$DOCS_ONLY" != "true" ]] && { [[ "$EVENT" == "merge_group" || "$EVENT" == "workflow_dispatch" ]] \
               || [[ "$EVENT" == "pull_request" && "$MERGE_QUEUE_ENABLED" != "true" ]] \
               || echo "$LABELS" | jq -e 'index("ci/merge")' > /dev/null; }; then
             # Full suite: all OSes
-            echo 'package_os_matrix=["fedora-43","fedora-44","fedora-45","fedora-46","centos-9","centos-10"]' >> "$GITHUB_OUTPUT"
-            echo 'integration_os_matrix=["fedora-43","fedora-44","centos-9","centos-10"]' >> "$GITHUB_OUTPUT"
-            echo 'upgrade_os_matrix=["fedora-44","centos-10"]' >> "$GITHUB_OUTPUT"
-            echo 'run_heavy=true' >> "$GITHUB_OUTPUT"
+            {
+              echo 'package_os_matrix=["fedora-43","fedora-44","fedora-45","fedora-46","centos-9","centos-10"]'
+              echo 'integration_os_matrix=["fedora-43","fedora-44","centos-9","centos-10"]'
+              echo 'integration_variant_matrix=["ostree","composefs"]'
+              echo 'integration_filesystem_matrix=["ext4","xfs"]'
+              echo 'integration_bootloader_matrix=["grub","systemd"]'
+              echo 'integration_boot_type_matrix=["bls","uki"]'
+              echo 'integration_seal_state_matrix=["sealed","unsealed"]'
+              echo 'upgrade_os_matrix=["fedora-44","centos-10"]'
+              echo 'run_heavy=true'
+            } >> "$GITHUB_OUTPUT"
           elif [[ "$DOCS_ONLY" != "true" ]] && echo "$LABELS" | jq -e 'index("ci/tier-1")' > /dev/null; then
             # Tier-1 only: centos-10
-            echo 'package_os_matrix=["centos-10"]' >> "$GITHUB_OUTPUT"
-            echo 'integration_os_matrix=["centos-10"]' >> "$GITHUB_OUTPUT"
-            echo 'upgrade_os_matrix=["centos-10"]' >> "$GITHUB_OUTPUT"
-            echo 'run_heavy=true' >> "$GITHUB_OUTPUT"
+            {
+              echo 'package_os_matrix=["centos-10"]'
+              echo 'integration_os_matrix=["centos-10"]'
+              echo 'integration_variant_matrix=["ostree","composefs"]'
+              echo 'integration_filesystem_matrix=["ext4","xfs"]'
+              echo 'integration_bootloader_matrix=["grub","systemd"]'
+              echo 'integration_boot_type_matrix=["bls","uki"]'
+              echo 'integration_seal_state_matrix=["sealed","unsealed"]'
+              echo 'upgrade_os_matrix=["centos-10"]'
+              echo 'run_heavy=true'
+            } >> "$GITHUB_OUTPUT"
           else
             # Plain PR or docs-only: skip heavy jobs entirely
-            echo 'package_os_matrix=[]' >> "$GITHUB_OUTPUT"
-            echo 'integration_os_matrix=[]' >> "$GITHUB_OUTPUT"
-            echo 'upgrade_os_matrix=[]' >> "$GITHUB_OUTPUT"
-            echo 'run_heavy=false' >> "$GITHUB_OUTPUT"
+            {
+              echo 'package_os_matrix=[]'
+              echo 'integration_os_matrix=[]'
+              echo 'integration_variant_matrix=[]'
+              echo 'integration_filesystem_matrix=[]'
+              echo 'integration_bootloader_matrix=[]'
+              echo 'integration_boot_type_matrix=[]'
+              echo 'integration_seal_state_matrix=[]'
+              echo 'upgrade_os_matrix=[]'
+              echo 'run_heavy=false'
+            } >> "$GITHUB_OUTPUT"
           fi
+          echo "fork_mode=$FORK_MODE" >> "$GITHUB_OUTPUT"
 
   # Run basic validation checks (linting, formatting, etc)
   validate:
+    if: needs.compute-ci-level.outputs.fork_mode != 'true'
+    needs: compute-ci-level
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
       - name: Validate (default)
         run: just validate
   # Check for security vulnerabilities and license compliance
   cargo-deny:
+    if: needs.compute-ci-level.outputs.fork_mode != 'true'
+    needs: compute-ci-level
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v7
@@ -165,14 +222,14 @@ jobs:
     # Disabled: this job is hanging in the chunkah/podman step even after
     # switching to native overlay (see "test-install: Fix chunkah hang").
     # Re-enable once the underlying hang is root-caused.
-    if: false && needs.compute-ci-level.outputs.run_heavy == 'true'
+    if: false && needs.compute-ci-level.outputs.fork_mode != 'true' && needs.compute-ci-level.outputs.run_heavy == 'true'
     needs: compute-ci-level
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
       - name: Use native overlay instead of fuse-overlayfs
         run: |
           sudo sed -i 's|mount_program.*|mount_program = ""|' /etc/containers/storage.conf
@@ -236,11 +293,13 @@ jobs:
           done
   # Test that we can build documentation
   docs:
+    if: needs.compute-ci-level.outputs.fork_mode != 'true'
+    needs: compute-ci-level
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
       - name: Build mdbook
         run: just build-mdbook
   # Build packages for each test OS
@@ -252,14 +311,14 @@ jobs:
       matrix:
         test_os: ${{ fromJson(needs.compute-ci-level.outputs.package_os_matrix) }}
 
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.compute-ci-level.outputs.fork_mode == 'true' && 'ubuntu-26.04' || 'ubuntu-24.04' }}
     # Rawhide is best-effort; don't let it block merges
     continue-on-error: ${{ matrix.test_os == 'fedora-46' }}
 
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
 
       - name: Setup env
         run: |
@@ -293,13 +352,13 @@ jobs:
       fail-fast: false
       matrix:
         test_os: ${{ fromJson(needs.compute-ci-level.outputs.integration_os_matrix) }}
-        variant: [ostree, composefs]
-        filesystem: ["ext4", "xfs"]
+        variant: ${{ fromJson(needs.compute-ci-level.outputs.integration_variant_matrix) }}
+        filesystem: ${{ fromJson(needs.compute-ci-level.outputs.integration_filesystem_matrix) }}
         # TODO: Remove "grub" once "grub-cc" is stable
         # bootloader: ["grub", "grub-cc", "systemd"]
-        bootloader: ["grub", "systemd"]
-        boot_type: ["bls", "uki"]
-        seal_state: ["sealed", "unsealed"]
+        bootloader: ${{ fromJson(needs.compute-ci-level.outputs.integration_bootloader_matrix) }}
+        boot_type: ${{ fromJson(needs.compute-ci-level.outputs.integration_boot_type_matrix) }}
+        seal_state: ${{ fromJson(needs.compute-ci-level.outputs.integration_seal_state_matrix) }}
 
         exclude:
           - seal_state: "sealed"
@@ -339,14 +398,31 @@ jobs:
           # - bootloader: grub-cc
           #   seal_state: sealed
 
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.compute-ci-level.outputs.fork_mode == 'true' && 'ubuntu-26.04' || 'ubuntu-24.04' }}
 
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
         with:
           libvirt: true
+      - name: Verify native Ubuntu and QEMU environment
+        if: needs.compute-ci-level.outputs.fork_mode == 'true'
+        run: |
+          set -euo pipefail
+          . /usr/lib/os-release
+          cat /usr/lib/os-release
+          test "$VERSION_ID" = 26.04
+          qemu_version=$(dpkg-query -W -f='${Version}' qemu-system-x86)
+          printf 'qemu-system-x86 %s\n' "$qemu_version"
+          dpkg --compare-versions "$qemu_version" ge-nl '1:10.2'
+          sha256sum "$(command -v qemu-system-x86_64)"
+          stat -c '/dev/kvm: %A %U:%G' /dev/kvm
+          test -r /dev/kvm -a -w /dev/kvm
+      - uses: actions/setup-python@v6
+        if: needs.compute-ci-level.outputs.fork_mode == 'true'
+        with:
+          python-version: '3.12'
       - name: Install tmt
         uses: ./.github/actions/install-tmt
 
@@ -426,7 +502,7 @@ jobs:
   # then run readonly tests to verify the upgrade worked.
   # Excluded: centos-9 (lacks systemd.extra-unit.* support needed for --bind-storage-ro)
   test-upgrade:
-    if: needs.compute-ci-level.outputs.run_heavy == 'true'
+    if: needs.compute-ci-level.outputs.fork_mode != 'true' && needs.compute-ci-level.outputs.run_heavy == 'true'
     needs: [compute-ci-level, package]
     strategy:
       fail-fast: false
@@ -443,7 +519,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
         with:
           libvirt: true
       - name: Install tmt
@@ -489,7 +565,7 @@ jobs:
   # different config format (prepare-root.conf) and is not covered here.
   # Runs once per distro × baseconfig — no bootloader/filesystem/boot_type matrix.
   test-baseconfigs:
-    if: needs.compute-ci-level.outputs.run_heavy == 'true'
+    if: needs.compute-ci-level.outputs.fork_mode != 'true' && needs.compute-ci-level.outputs.run_heavy == 'true'
     needs: [compute-ci-level, package]
     strategy:
       fail-fast: false
@@ -505,7 +581,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
         with:
           libvirt: true
       - name: Install tmt
@@ -571,7 +647,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
         with:
           libvirt: true
       - name: Install tmt
@@ -607,14 +683,14 @@ jobs:
   # Builds localhost/bootc, exports as tarball, installs via Anaconda in QEMU,
   # and verifies the resulting disk boots.
   test-container-export:
-    if: needs.compute-ci-level.outputs.run_heavy == 'true'
+    if: needs.compute-ci-level.outputs.fork_mode != 'true' && needs.compute-ci-level.outputs.run_heavy == 'true'
     needs: [compute-ci-level, package]
     runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@main
+        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
         with:
           libvirt: true
 
