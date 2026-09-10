@@ -26,6 +26,11 @@ on:
         required: false
         default: false
         type: boolean
+      reuse_package_run_id:
+        description: Reuse a successful CentOS 9 package job from this fork
+        required: false
+        default: ''
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,6 +72,7 @@ jobs:
       integration_seal_state_matrix: ${{ steps.matrix.outputs.integration_seal_state_matrix }}
       upgrade_os_matrix: ${{ steps.matrix.outputs.upgrade_os_matrix }}
       fork_mode: ${{ steps.matrix.outputs.fork_mode }}
+      reuse_package_run_id: ${{ steps.matrix.outputs.reuse_package_run_id }}
       run_heavy: ${{ steps.matrix.outputs.run_heavy }}
       merge_queue_enabled: ${{ steps.merge-queue.outputs.enabled }}
       docs_only: ${{ steps.docs-check.outputs.docs_only }}
@@ -130,7 +136,13 @@ jobs:
           DOCS_ONLY='${{ steps.docs-check.outputs.docs_only }}'
           REPOSITORY='${{ github.repository }}'
           FORK_TEST='${{ inputs.ubuntu2604_fork_test || false }}'
+          REUSE_PACKAGE_RUN_ID='${{ inputs.reuse_package_run_id }}'
           FORK_MODE=false
+
+          if [[ -n "$REUSE_PACKAGE_RUN_ID" && ! "$REUSE_PACKAGE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo 'reuse_package_run_id must contain only decimal digits' >&2
+            exit 1
+          fi
 
           if [[ "$EVENT" == "workflow_dispatch" && "$REPOSITORY" == "cgwalters-bot/bootc" && "$FORK_TEST" == "true" ]]; then
             # Keep the fork validation focused on the PR's composefs sealed-UKI
@@ -189,7 +201,12 @@ jobs:
               echo 'run_heavy=false'
             } >> "$GITHUB_OUTPUT"
           fi
+          if [[ "$FORK_MODE" != "true" && -n "$REUSE_PACKAGE_RUN_ID" ]]; then
+            echo 'reuse_package_run_id is only allowed with ubuntu2604_fork_test' >&2
+            exit 1
+          fi
           echo "fork_mode=$FORK_MODE" >> "$GITHUB_OUTPUT"
+          echo "reuse_package_run_id=$REUSE_PACKAGE_RUN_ID" >> "$GITHUB_OUTPUT"
 
   # Run basic validation checks (linting, formatting, etc)
   validate:
@@ -306,6 +323,7 @@ jobs:
   package:
     if: needs.compute-ci-level.outputs.run_heavy == 'true'
     needs: compute-ci-level
+    timeout-minutes: ${{ needs.compute-ci-level.outputs.fork_mode == 'true' && 60 || 360 }}
     strategy:
       fail-fast: false
       matrix:
@@ -318,29 +336,72 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Bootc Ubuntu Setup
+        if: needs.compute-ci-level.outputs.reuse_package_run_id == ''
         uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
 
       - name: Setup env
+        if: needs.compute-ci-level.outputs.reuse_package_run_id == ''
         run: |
           BASE=$(just pullspec-for-os base ${{ matrix.test_os }})
           echo "BOOTC_base=${BASE}" >> $GITHUB_ENV
 
       - name: Build packages (and verify build system)
+        if: needs.compute-ci-level.outputs.reuse_package_run_id == ''
         run: just check-buildsys
+
+      - name: Validate and locate reusable package artifact
+        if: needs.compute-ci-level.outputs.reuse_package_run_id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_RUN_ID: ${{ needs.compute-ci-level.outputs.reuse_package_run_id }}
+        run: |
+          set -euo pipefail
+          source_repo=cgwalters-bot/bootc
+          run_api="repos/${source_repo}/actions/runs/${PACKAGE_RUN_ID}"
+          run_json=$(gh api "$run_api")
+          test "$(jq -r '.head_repository.full_name' <<<"$run_json")" = "$source_repo"
+          source_sha=$(jq -r '.head_sha' <<<"$run_json")
+          test "$source_sha" != null
+          git fetch --no-tags https://github.com/${source_repo}.git "$source_sha"
+          git diff --exit-code "$source_sha" HEAD -- . ':(exclude).github/workflows/ci.yml'
+
+          job=$(gh api --paginate "${run_api}/jobs" --jq \
+            '.jobs[] | select(.name == "package (centos-9)") | select(.conclusion == "success")')
+          test -n "$job"
+          artifact=$(gh api --paginate "${run_api}/artifacts" --jq \
+            '.artifacts[] | select(.name == "packages-centos-9" and .expired == false) | [.created_at, .id] | @tsv' | sort -r | head -n1)
+          test -n "$artifact"
+          printf 'Reusing package run %s, source %s, artifact %s\n' \
+            "$PACKAGE_RUN_ID" "$source_sha" "$artifact"
+
+      - name: Download reusable package artifact
+        if: needs.compute-ci-level.outputs.reuse_package_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: cgwalters-bot/bootc
+          run-id: ${{ needs.compute-ci-level.outputs.reuse_package_run_id }}
+          name: packages-centos-9
+          path: target/packages/
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v7
         with:
           name: packages-${{ matrix.test_os }}
           path: target/packages/*.rpm
-          retention-days: 1
+          retention-days: ${{ needs.compute-ci-level.outputs.fork_mode == 'true' && 7 || 1 }}
 
       # Unit tests don't depend on the variant/filesystem/bootloader/boot_type/seal_state
       # axes used by the test-integration matrix below, so we run them once per OS here
       # (reusing the BuildKit cache already warmed by `just check-buildsys` above) instead
       # of once per matrix leg.
       - name: Unit tests
+        if: needs.compute-ci-level.outputs.reuse_package_run_id == ''
         run: just unit-tests
+
+      - name: Reused package job status
+        if: needs.compute-ci-level.outputs.reuse_package_run_id != ''
+        run: echo 'Unit tests skipped; they passed in the referenced package run.'
 
   # Build bootc from source into a container image FROM each specified base `test_os`
   # running unit and integration tests (using TMT, leveraging the support for nested virtualization
@@ -348,6 +409,7 @@ jobs:
   test-integration:
     if: needs.compute-ci-level.outputs.run_heavy == 'true'
     needs: [compute-ci-level, package]
+    timeout-minutes: ${{ needs.compute-ci-level.outputs.fork_mode == 'true' && 60 || 360 }}
     strategy:
       fail-fast: false
       matrix:
@@ -405,7 +467,28 @@ jobs:
       - name: Bootc Ubuntu Setup
         uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
         with:
-          libvirt: true
+          # qemu-kvm is virtual-only on Ubuntu 26.04, so install the native
+          # virtualization stack below for the fork validation.
+          libvirt: ${{ needs.compute-ci-level.outputs.fork_mode != 'true' }}
+      - name: Install native Ubuntu 26 virtualization stack
+        if: needs.compute-ci-level.outputs.fork_mode == 'true'
+        run: |
+          set -euo pipefail
+           sudo timeout 5m apt-get install -y libkrb5-dev pkg-config libvirt-dev genisoimage ipxe-qemu qemu-utils qemu-system-x86 virtiofsd libvirt-daemon-system python3-virt-firmware
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm -a -w /dev/kvm
+
+          bcvk_dir=$(mktemp -d)
+          trap 'rm -rf "$bcvk_dir"' EXIT
+          curl --fail --show-error --location --connect-timeout 10 --max-time 300 \
+            --retry 3 --retry-delay 5 --retry-max-time 300 \
+            --output "$bcvk_dir/bcvk.tar.gz" \
+            https://github.com/bootc-dev/bcvk/releases/download/v0.19.0/bcvk-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf "$bcvk_dir/bcvk.tar.gz" -C "$bcvk_dir"
+          sudo install -T "$bcvk_dir/bcvk-x86_64-unknown-linux-gnu" /usr/bin/bcvk
+          sudo sed -i -e 's,^\* hard nofile 65536,* hard nofile 524288,' /etc/security/limits.conf
       - name: Verify native Ubuntu and QEMU environment
         if: needs.compute-ci-level.outputs.fork_mode == 'true'
         run: |
