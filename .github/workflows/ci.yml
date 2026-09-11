@@ -26,6 +26,11 @@ on:
         required: false
         default: false
         type: boolean
+      debug_tmate:
+        description: Keep the Ubuntu 26.04 fork runner available for SSH debugging
+        required: false
+        default: false
+        type: boolean
       reuse_package_run_id:
         description: Reuse a successful CentOS 9 package job from this fork
         required: false
@@ -464,6 +469,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        # The optional tmate shell runs later in this job; do not leave the
+        # workflow token in the checkout's Git configuration for it to read.
+        with:
+          persist-credentials: false
       - name: Bootc Ubuntu Setup
         uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
         with:
@@ -574,6 +583,57 @@ jobs:
         with:
           name: packages-${{ matrix.test_os }}
           path: target/packages/
+
+      # This workflow is fork-only and manually dispatched.  Do not use the
+      # actor-key lookup in action-tmate: the bot account intentionally has no
+      # GitHub SSH keys.  tmate reads this option from ~/.tmate.conf before it
+      # creates the session, so SSH access is restricted from the first
+      # connection rather than relying on a public session URL.
+      - name: Configure restricted tmate SSH access
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          cat > "$HOME/.ssh/authorized_keys" <<'EOF'
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGMAzoPzAkrzE11BHbdoIDSgXbd2ReF/JWZi5xAKhpFh personal-ai@walters-personal-ai
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOQkQHeKan3X+g1jILw4a3KtcfEIED0kByKGWookU7ev
+          EOF
+          chmod 600 "$HOME/.ssh/authorized_keys"
+          printf 'set-option -g tmate-authorized-keys "%s"\n' \
+            "$HOME/.ssh/authorized_keys" > "$HOME/.tmate.conf"
+          chmod 600 "$HOME/.tmate.conf"
+
+      - name: Start restricted tmate session
+        id: tmate
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
+        uses: mxschmitt/action-tmate@v3.24 # 35b54afac29c97fb54faba5b513f8fbd1882f113
+        with:
+          detached: true
+          limit-access-to-actor: false
+          connect-timeout-seconds: 1800
+          tmate-server-host: ssh.tmate.io
+          tmate-server-port: 22
+          tmate-server-rsa-fingerprint: SHA256:Hthk2T/M/Ivqfk1YYUn5ijC2Att3+UPzD7Rn72P5VWs
+          tmate-server-ed25519-fingerprint: SHA256:jfttvoypkHiQYUqUCwKeqd9d1fJj/ZiQlFOHVl6E9sI
+
+      # The action prints the same address in the live log, but this small
+      # artifact makes it retrievable while the job is still running.  It is
+      # only a bearer address; SSH still requires one of the keys above.
+      - name: Publish tmate SSH address
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
+        env:
+          TMATE_SSH_ADDRESS: ${{ steps.tmate.outputs.ssh-address }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$TMATE_SSH_ADDRESS" > "$RUNNER_TEMP/tmate-ssh-address"
+
+      - name: Upload tmate SSH address
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: tmate-ssh-address-${{ matrix.test_os }}-${{ matrix.variant }}-${{ matrix.bootloader }}-${{ matrix.boot_type }}-${{ matrix.filesystem }}-${{ matrix.seal_state }}
+          path: ${{ runner.temp }}/tmate-ssh-address
+          retention-days: 1
 
       - name: Fetch external dependencies (with retry)
         run: BOOTC_SKIP_PACKAGE=1 just build-fetch
