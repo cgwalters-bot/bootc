@@ -474,7 +474,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@af52410cc240d663e8911a699cb9c598b3b64f25
+        uses: cgwalters-bot/actions/bootc-ubuntu-setup@5a7a218d8983519681677b1bbcbbb402fa1e6637
         with:
           # qemu-kvm is virtual-only on Ubuntu 26.04, so install the native
           # virtualization stack below for the fork validation.
@@ -583,6 +583,28 @@ jobs:
         with:
           name: packages-${{ matrix.test_os }}
           path: target/packages/
+
+      - name: Verify nested bwrap capabilities
+        if: needs.compute-ci-level.outputs.fork_mode == 'true'
+        run: |
+          set -euo pipefail
+          test "$(cat /sys/module/apparmor/parameters/enabled)" = Y
+          sysctl kernel.apparmor_restrict_unprivileged_userns
+          timeout --signal=TERM --kill-after=10s 5m \
+            podman run --rm -i --cap-add=all \
+              --security-opt=label=type:container_runtime_t --device /dev/fuse \
+              quay.io/centos-bootc/centos-bootc:stream9 bash -euxo pipefail <<'CONTAINER'
+          mkdir /bwrap-tmp
+          touch /bwrap-tmp/parent
+          chown 1:1 /bwrap-tmp/parent
+          bwrap --bind / / --proc /proc --dev /dev /bin/bash -euxo pipefail -c '
+            label=$(cat /proc/self/attr/current)
+            test "$label" = "bwrap (enforce)"
+            touch /bwrap-tmp/child
+            chown 1:1 /bwrap-tmp/child
+            test "$(stat -c %u:%g /bwrap-tmp/child)" = 1:1
+          '
+          CONTAINER
 
       # This workflow is fork-only and manually dispatched.  The bot account
       # has no GitHub SSH keys, so provide the two explicitly authorized keys
