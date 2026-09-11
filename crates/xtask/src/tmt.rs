@@ -36,9 +36,16 @@ const ENV_BOOTC_UPGRADE_IMAGE: &str = "BOOTC_upgrade_image";
 // Distro identifiers
 const DISTRO_CENTOS_9: &str = "centos-9";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradeImageDelivery {
+    SharedStorage,
+    SshArchive,
+    GuestFallback,
+}
+
 // Import the argument types from xtask.rs
 use crate::bcvk::BcvkInstallOpts;
-use crate::{RunTmtArgs, SealState, TmtProvisionArgs, out_of_sync_error};
+use crate::{BootType, RunTmtArgs, SealState, TmtProvisionArgs, out_of_sync_error};
 
 /// Generate a random alphanumeric suffix for VM names
 fn generate_random_suffix() -> String {
@@ -132,6 +139,172 @@ fn detect_variantid_from_image(sh: &Shell, image: &str) -> Result<Option<String>
 /// CentOS 9 lacks systemd.extra-unit.* support required for bind-storage-ro
 fn distro_supports_bind_storage_ro(distro: &str) -> bool {
     !distro.starts_with(DISTRO_CENTOS_9)
+}
+
+fn upgrade_image_delivery(distro: &str, supplied: bool) -> UpgradeImageDelivery {
+    match (supplied, distro_supports_bind_storage_ro(distro)) {
+        (true, true) => UpgradeImageDelivery::SharedStorage,
+        (true, false) => UpgradeImageDelivery::SshArchive,
+        (false, _) => UpgradeImageDelivery::GuestFallback,
+    }
+}
+
+/// OCI archives cannot preserve a digest-qualified reference when loaded into
+/// the guest's local store.  The shared-storage path does not have this
+/// limitation, so keep digest references working unchanged there.
+fn validate_upgrade_image_ref(delivery: UpgradeImageDelivery, image: Option<&str>) -> Result<()> {
+    if delivery == UpgradeImageDelivery::SshArchive
+        && image.is_some_and(|image| image.contains('@'))
+    {
+        anyhow::bail!(
+            "CentOS 9 SSH archive delivery does not support digest-qualified upgrade images; assign the image a named tag and pass that tag via --upgrade-image"
+        );
+    }
+    Ok(())
+}
+
+fn plan_requests_upgrade(
+    plan: &str,
+    metadata: &std::collections::HashMap<String, PlanMetadata>,
+) -> bool {
+    metadata
+        .iter()
+        .find(|(key, _)| plan.ends_with(key.as_str()))
+        .map(|(_, data)| data.try_bind_storage)
+        .unwrap_or(false)
+}
+
+fn quote_remote_command(args: &[&str]) -> Result<String> {
+    shlex::try_join(args.iter().copied())
+        .map_err(|e| anyhow::anyhow!("Quoting remote SSH command: {e}"))
+}
+
+fn sealed_uki_upgrade_requires_image(
+    seal_state: Option<&SealState>,
+    boot_type: &BootType,
+    has_upgrade_plan: bool,
+    supplied_image: bool,
+) -> bool {
+    has_upgrade_plan
+        && !supplied_image
+        && seal_state == Some(&SealState::Sealed)
+        && boot_type == &BootType::Uki
+}
+
+/// Save a host-built upgrade image without putting signing keys in the guest.
+/// Keep the large archive outside the TMT artifact tree in disk-backed `/var/tmp`.
+/// `TMPDIR` can override that location for hosts with a different scratch disk.
+#[context("Saving upgrade image for guest transfer")]
+fn save_upgrade_image(image: &str) -> Result<tempfile::NamedTempFile> {
+    let scratch = std::env::var_os("TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"));
+    let archive = tempfile::Builder::new()
+        .prefix("bootc-upgrade-")
+        .suffix(".tar")
+        .tempfile_in(&scratch)
+        .with_context(|| {
+            format!(
+                "Creating disk-backed upgrade archive in {}",
+                scratch.display()
+            )
+        })?;
+    let archive_path =
+        Utf8Path::from_path(archive.path()).context("Upgrade archive path is not valid UTF-8")?;
+    let output = archive
+        .as_file()
+        .try_clone()
+        .context("Cloning upgrade archive output handle")?;
+    let status = std::process::Command::new("timeout")
+        .args([
+            "--kill-after=30s",
+            "300s",
+            "podman",
+            "save",
+            "--format",
+            "oci-archive",
+            image,
+        ])
+        .stdout(std::process::Stdio::from(output))
+        .status()
+        .with_context(|| format!("Saving upgrade image {image} to {archive_path}"))?;
+    if !status.success() {
+        anyhow::bail!("Saving upgrade image {image} to {archive_path} failed: {status}");
+    }
+    Ok(archive)
+}
+
+/// Import an upgrade image into a CentOS 9 guest, whose systemd lacks the
+/// extra-unit support needed by bcvk's shared-storage fast path.
+#[context("Transferring signed upgrade image to guest")]
+fn transfer_upgrade_image(
+    sh: &Shell,
+    ssh_port: u16,
+    key_path: &Utf8Path,
+    archive: &tempfile::NamedTempFile,
+    image: &str,
+    vm_name: &str,
+) -> Result<()> {
+    let archive_path =
+        Utf8Path::from_path(archive.path()).context("Upgrade archive path is not valid UTF-8")?;
+    let guest_archive = format!("/var/tmp/bootc-upgrade-{vm_name}.tar");
+    let port = ssh_port.to_string();
+    let scp_target = shlex::try_quote(&format!("root@localhost:{guest_archive}"))
+        .map_err(|e| anyhow::anyhow!("Quoting SCP destination: {e}"))?
+        .to_string();
+    let remove_command = quote_remote_command(&["rm", "-f", &guest_archive])?;
+
+    let copy_result = cmd!(
+        sh,
+        "timeout --kill-after=30s 300s scp -q -i {key_path} -P {port} -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes {archive_path} {scp_target}"
+    )
+    .run();
+    if let Err(e) = copy_result {
+        let _ = cmd!(
+            sh,
+            "timeout --kill-after=30s 300s ssh -i {key_path} -p {port} -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes root@localhost {remove_command}"
+        )
+        .ignore_status()
+        .run();
+        return Err(e).with_context(|| format!("Copying {archive_path} to guest {guest_archive}"));
+    }
+
+    let load_command = format!(
+        "{} < {}",
+        quote_remote_command(&["podman", "load"])?,
+        shlex::try_quote(&guest_archive)
+            .map_err(|e| anyhow::anyhow!("Quoting archive input: {e}"))?
+    );
+    let load_result = cmd!(
+        sh,
+        "timeout --kill-after=30s 300s ssh -i {key_path} -p {port} -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes root@localhost {load_command}"
+    )
+    .run();
+    if let Err(e) = load_result {
+        let _ = cmd!(
+            sh,
+            "timeout --kill-after=30s 300s ssh -i {key_path} -p {port} -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes root@localhost {remove_command}"
+        )
+        .ignore_status()
+        .run();
+        return Err(e).with_context(|| format!("Importing upgrade image {image} in guest"));
+    }
+
+    let inspect_command = quote_remote_command(&["podman", "image", "inspect", "--", image])?;
+    let inspect_result = cmd!(
+        sh,
+        "timeout --kill-after=30s 300s ssh -i {key_path} -p {port} -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes root@localhost {inspect_command}"
+    )
+    .ignore_stdout()
+    .run();
+    let _ = cmd!(
+        sh,
+        "timeout --kill-after=30s 300s ssh -i {key_path} -p {port} -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes root@localhost {remove_command}"
+    )
+    .ignore_status()
+    .run();
+    inspect_result.with_context(|| format!("Validating upgrade image {image} in guest"))?;
+    Ok(())
 }
 
 /// Collect and print diagnostics useful for understanding host disk-space
@@ -393,6 +566,8 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
         kargs: args.karg.clone(),
     };
     let firmware_args = bcvk_opts.firmware_args()?;
+    let upgrade_delivery = upgrade_image_delivery(&distro, args.upgrade_image.is_some());
+    validate_upgrade_image_ref(upgrade_delivery, args.upgrade_image.as_deref())?;
 
     // Create tmt-workdir and copy tmt bits to it
     // This works around https://github.com/teemtee/tmt/issues/4062
@@ -484,6 +659,36 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
         return Ok(());
     }
 
+    let has_upgrade_plan = plans
+        .iter()
+        .any(|plan| plan_requests_upgrade(plan, &plan_metadata));
+    if sealed_uki_upgrade_requires_image(
+        args.seal_state.as_ref(),
+        &args.boot_type,
+        has_upgrade_plan,
+        args.upgrade_image.is_some(),
+    ) {
+        anyhow::bail!(
+            "sealed UKI upgrade plan requires --upgrade-image; refusing to generate an unsigned guest-local UKI"
+        );
+    }
+
+    // CentOS 9 cannot use bcvk's host-storage mount. Save the already-built,
+    // signed upgrade image once and import it into each test guest after SSH
+    // becomes available. Other distros retain the shared-storage fast path.
+    let upgrade_archive = if upgrade_delivery == UpgradeImageDelivery::SshArchive {
+        if !has_upgrade_plan {
+            None
+        } else {
+            args.upgrade_image
+                .as_deref()
+                .map(|image| save_upgrade_image(image))
+                .transpose()?
+        }
+    } else {
+        None
+    };
+
     println!("Found {} test plan(s): {:?}", plans.len(), plans);
 
     // Determine base log directory: CLI flag > TMT_LOG_DIR env var > default.
@@ -527,6 +732,7 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
 
         // Reset plan-specific environment variables
         tmt_env_vars.clear();
+        let plan_needs_upgrade = plan_requests_upgrade(plan, &plan_metadata);
 
         // Get bcvk-opts based on plan metadata and distro support
         let plan_bcvk_opts = {
@@ -534,11 +740,7 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
 
             // Plan names from tmt are like /tmt/plans/integration/plan-01-readonly
             // but metadata keys are like /plan-01-readonly, so match on suffix
-            let try_bind_storage = plan_metadata
-                .iter()
-                .find(|(key, _)| plan.ends_with(key.as_str()))
-                .map(|(_, v)| v.try_bind_storage)
-                .unwrap_or(false);
+            let try_bind_storage = plan_needs_upgrade;
 
             let mut opts = Vec::new();
 
@@ -700,6 +902,33 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
 
         println!("SSH connectivity verified");
 
+        if upgrade_delivery == UpgradeImageDelivery::SshArchive && plan_needs_upgrade {
+            let upgrade_image = args
+                .upgrade_image
+                .as_deref()
+                .expect("SSH archive delivery requires an upgrade image");
+            if let Err(e) = transfer_upgrade_image(
+                sh,
+                ssh_port,
+                &key_path,
+                upgrade_archive
+                    .as_ref()
+                    .expect("upgrade archive should have been created"),
+                upgrade_image,
+                &vm_name,
+            ) {
+                eprintln!("Failed to deliver upgrade image for plan {}: {:#}", plan, e);
+                cleanup_vm();
+                all_passed = false;
+                test_results.push((plan.to_string(), false, None));
+                continue;
+            }
+            // Set this only after the guest import and reference validation
+            // succeeded; otherwise the test silently falls back to building
+            // an unsigned UKI inside the guest.
+            tmt_env_vars.push(format!("{}={upgrade_image}", ENV_BOOTC_UPGRADE_IMAGE));
+        }
+
         let ssh_port_str = ssh_port.to_string();
 
         // Run tmt for this specific plan using connect provisioner
@@ -826,6 +1055,116 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod upgrade_delivery_tests {
+    use std::collections::HashMap;
+
+    use super::{
+        BootType, PlanMetadata, SealState, UpgradeImageDelivery, plan_requests_upgrade,
+        quote_remote_command, sealed_uki_upgrade_requires_image, upgrade_image_delivery,
+        validate_upgrade_image_ref,
+    };
+
+    #[test]
+    fn upgrade_delivery_is_selected_by_distro_and_image() {
+        for (distro, supplied, expected) in [
+            ("centos-9", true, UpgradeImageDelivery::SshArchive),
+            ("centos-10", true, UpgradeImageDelivery::SharedStorage),
+            ("fedora-44", true, UpgradeImageDelivery::SharedStorage),
+            ("centos-9", false, UpgradeImageDelivery::GuestFallback),
+            ("fedora-44", false, UpgradeImageDelivery::GuestFallback),
+        ] {
+            assert_eq!(upgrade_image_delivery(distro, supplied), expected);
+        }
+    }
+
+    #[test]
+    fn only_upgrade_plans_need_image_delivery() {
+        let metadata = HashMap::from([
+            (
+                "plan-24-image-upgrade-reboot".to_string(),
+                PlanMetadata {
+                    try_bind_storage: true,
+                    ..Default::default()
+                },
+            ),
+            ("plan-01-readonly".to_string(), PlanMetadata::default()),
+        ]);
+
+        assert!(plan_requests_upgrade(
+            "/tmt/plans/integration/plan-24-image-upgrade-reboot",
+            &metadata
+        ));
+        assert!(!plan_requests_upgrade(
+            "/tmt/plans/integration/plan-01-readonly",
+            &metadata
+        ));
+        assert!(!plan_requests_upgrade(
+            "/tmt/plans/integration/unknown",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn remote_commands_round_trip_without_shell_splitting() {
+        for image in [
+            "registry.example/image@sha256:abc123",
+            "registry.example/image name; echo unsafe",
+            "registry.example/image'quoted",
+            "-leading-image",
+        ] {
+            let command =
+                quote_remote_command(&["podman", "image", "inspect", "--", image]).unwrap();
+            assert_eq!(shlex::split(&command).unwrap().last().unwrap(), image);
+        }
+        assert!(quote_remote_command(&["printf", "bad\0arg"]).is_err());
+    }
+
+    #[test]
+    fn sealed_uki_upgrade_requires_image_only_for_upgrade_plans() {
+        assert!(sealed_uki_upgrade_requires_image(
+            Some(&SealState::Sealed),
+            &BootType::Uki,
+            true,
+            false
+        ));
+        assert!(!sealed_uki_upgrade_requires_image(
+            Some(&SealState::Sealed),
+            &BootType::Uki,
+            false,
+            false
+        ));
+        assert!(!sealed_uki_upgrade_requires_image(
+            Some(&SealState::Sealed),
+            &BootType::Bls,
+            true,
+            false
+        ));
+        assert!(!sealed_uki_upgrade_requires_image(
+            Some(&SealState::Unsealed),
+            &BootType::Uki,
+            true,
+            false
+        ));
+        assert!(!sealed_uki_upgrade_requires_image(
+            Some(&SealState::Sealed),
+            &BootType::Uki,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn digest_refs_are_rejected_only_for_c9_archive_delivery() {
+        let digest = Some("localhost/bootc-upgrade@sha256:deadbeef");
+        assert!(validate_upgrade_image_ref(UpgradeImageDelivery::SshArchive, digest).is_err());
+        assert!(validate_upgrade_image_ref(UpgradeImageDelivery::SshArchive, None).is_ok());
+        assert!(validate_upgrade_image_ref(UpgradeImageDelivery::GuestFallback, None).is_ok());
+        assert!(validate_upgrade_image_ref(UpgradeImageDelivery::SharedStorage, digest).is_ok());
+        assert!(validate_upgrade_image_ref(UpgradeImageDelivery::SharedStorage, None).is_ok());
+    }
 }
 
 /// Provision a VM for manual tmt testing
