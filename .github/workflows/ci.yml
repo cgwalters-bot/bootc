@@ -26,7 +26,7 @@ on:
         required: false
         default: false
         type: boolean
-      debug_tmate:
+      debug_upterm:
         description: Keep the Ubuntu 26.04 fork runner available for SSH debugging
         required: false
         default: false
@@ -469,7 +469,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-        # The optional tmate shell runs later in this job; do not leave the
+        # The optional Upterm shell runs later in this job; do not leave the
         # workflow token in the checkout's Git configuration for it to read.
         with:
           persist-credentials: false
@@ -584,55 +584,79 @@ jobs:
           name: packages-${{ matrix.test_os }}
           path: target/packages/
 
-      # This workflow is fork-only and manually dispatched.  Do not use the
-      # actor-key lookup in action-tmate: the bot account intentionally has no
-      # GitHub SSH keys.  tmate reads this option from ~/.tmate.conf before it
-      # creates the session, so SSH access is restricted from the first
-      # connection rather than relying on a public session URL.
-      - name: Configure restricted tmate SSH access
-        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
+      # This workflow is fork-only and manually dispatched.  The bot account
+      # has no GitHub SSH keys, so provide the two explicitly authorized keys
+      # through Upterm's UPTERM_AUTHORIZED_KEYS file instead of using its
+      # GitHub-user lookup or an unauthenticated public session.
+      - name: Configure restricted Upterm SSH access
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_upterm == true }}
         run: |
           set -euo pipefail
           install -d -m 700 "$HOME/.ssh"
-          cat > "$HOME/.ssh/authorized_keys" <<'EOF'
+          cat > "$RUNNER_TEMP/upterm-authorized-keys" <<'EOF'
           ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGMAzoPzAkrzE11BHbdoIDSgXbd2ReF/JWZi5xAKhpFh personal-ai@walters-personal-ai
           ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOQkQHeKan3X+g1jILw4a3KtcfEIED0kByKGWookU7ev
           EOF
-          chmod 600 "$HOME/.ssh/authorized_keys"
-          printf 'set-option -g tmate-authorized-keys "%s"\n' \
-            "$HOME/.ssh/authorized_keys" > "$HOME/.tmate.conf"
-          chmod 600 "$HOME/.tmate.conf"
+          chmod 600 "$RUNNER_TEMP/upterm-authorized-keys"
+          test -s "$RUNNER_TEMP/upterm-authorized-keys"
+          test "$(ssh-keygen -lf "$RUNNER_TEMP/upterm-authorized-keys" | wc -l)" -eq 2
 
-      - name: Start restricted tmate session
-        id: tmate
-        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
-        uses: mxschmitt/action-tmate@v3.24 # 35b54afac29c97fb54faba5b513f8fbd1882f113
-        with:
-          detached: true
-          limit-access-to-actor: false
-          connect-timeout-seconds: 1800
-          tmate-server-host: ssh.tmate.io
-          tmate-server-port: 22
-          tmate-server-rsa-fingerprint: SHA256:Hthk2T/M/Ivqfk1YYUn5ijC2Att3+UPzD7Rn72P5VWs
-          tmate-server-ed25519-fingerprint: SHA256:jfttvoypkHiQYUqUCwKeqd9d1fJj/ZiQlFOHVl6E9sI
+          # Observed out-of-band from the live relay; this is not a claim of
+          # independent publisher authentication.  Keep the pinned key for
+          # both Upterm's host callback and the local client instructions.
+          cat > "$HOME/.ssh/known_hosts" <<'EOF'
+          uptermd.upterm.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICiecex8Dq718eSe1CCLgLvDmI7AagvCtax7brPFWkh4
+          EOF
+          chmod 600 "$HOME/.ssh/known_hosts"
 
-      # The action prints the same address in the live log, but this small
-      # artifact makes it retrievable while the job is still running.  It is
-      # only a bearer address; SSH still requires one of the keys above.
-      - name: Publish tmate SSH address
-        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
-        env:
-          TMATE_SSH_ADDRESS: ${{ steps.tmate.outputs.ssh-address }}
+      - name: Preflight Upterm relay
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_upterm == true }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$TMATE_SSH_ADDRESS" > "$RUNNER_TEMP/tmate-ssh-address"
+          timeout 10s getent ahostsv4 uptermd.upterm.dev >/dev/null
+          timeout 10s bash -c ': </dev/tcp/uptermd.upterm.dev/22'
 
-      - name: Upload tmate SSH address
-        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_tmate == true }}
+      - name: Start restricted Upterm session
+        id: upterm
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_upterm == true }}
+        uses: owenthereal/action-upterm@47652056242288ccbebd30f836e9885d09a75365 # v1.15.0
+        timeout-minutes: 5
+        env:
+          UPTERM_AUTHORIZED_KEYS: ${{ runner.temp }}/upterm-authorized-keys
+        with:
+          upterm-version: v0.26.0
+          detached: true
+          wait-timeout-minutes: 30
+
+      # The raw command is retrievable through the Actions API while the job
+      # runs.  It is not evaluated here; the coordinator must parse and use
+      # it only with the pinned client host key and local private key.
+      - name: Validate and publish Upterm SSH address
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_upterm == true }}
+        env:
+          UPTERM_SSH_COMMAND: ${{ steps.upterm.outputs.ssh-command }}
+        run: |
+          set -euo pipefail
+          upterm_tmp=$(node -p 'require("os").tmpdir()')
+          shopt -s nullglob
+          sockets=("$upterm_tmp"/upterm-data/runtime/upterm/*.sock)
+          test "${#sockets[@]}" -eq 1
+          session=$(upterm session current --admin-socket "${sockets[0]}")
+          for fingerprint in \
+            SHA256:jusj7ZW6GCt+aZJxVuTI5cwP2ugciAOkqC/ppjy/Cdc \
+            SHA256:6EQswdUrLKN8cHF4bUbT7kQ5qvq2ZEyja/tgrRN1UwY; do
+            [[ "$session" == *"$fingerprint"* ]]
+            printf 'Verified authorized key fingerprint: %s\n' "$fingerprint"
+          done
+          [[ "$UPTERM_SSH_COMMAND" =~ ^ssh[[:space:]]+[^[:space:]]+@uptermd\.upterm\.dev([[:space:]]+-p[[:space:]][0-9]+)?$ ]]
+          printf '%s\n' "$UPTERM_SSH_COMMAND" > "$RUNNER_TEMP/upterm-ssh-address"
+
+      - name: Upload Upterm SSH address
+        if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_upterm == true }}
         uses: actions/upload-artifact@v7
         with:
-          name: tmate-ssh-address-${{ matrix.test_os }}-${{ matrix.variant }}-${{ matrix.bootloader }}-${{ matrix.boot_type }}-${{ matrix.filesystem }}-${{ matrix.seal_state }}
-          path: ${{ runner.temp }}/tmate-ssh-address
+          name: upterm-ssh-address-${{ matrix.test_os }}-${{ matrix.variant }}-${{ matrix.bootloader }}-${{ matrix.boot_type }}-${{ matrix.filesystem }}-${{ matrix.seal_state }}
+          path: ${{ runner.temp }}/upterm-ssh-address
           retention-days: 1
 
       - name: Fetch external dependencies (with retry)
