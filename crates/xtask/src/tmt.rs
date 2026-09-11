@@ -243,6 +243,7 @@ fn verify_ssh_connectivity(sh: &Shell, port: u16, key_path: &Utf8Path) -> Result
             sh,
             "timeout --signal=TERM --kill-after={command_kill_grace} {command_timeout} ssh -i {key_path} -p {port_str} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o IdentitiesOnly=yes root@localhost 'export TEST=value; whoami'"
         )
+        .ignore_status()
         .output();
 
         match result {

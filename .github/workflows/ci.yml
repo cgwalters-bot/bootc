@@ -289,6 +289,251 @@ jobs:
             --seal-state=unsealed --boot-type=bls \
             localhost/bootc readonly --preserve-vm
 
+      - name: Capture preserved VM firmware evidence
+        if: always()
+        run: |
+          set -uo pipefail
+          if [[ -f "$RUNNER_TEMP/upterm-ci-environment.sh" ]]; then
+            source "$RUNNER_TEMP/upterm-ci-environment.sh"
+          fi
+          diagnostics="$RUNNER_TEMP/reproduction-diagnostics"
+          install -d -m 700 "$diagnostics"
+          python3 - "$diagnostics" <<'PY' || printf '%s\n' 'Firmware evidence capture failed unexpectedly.' > "$diagnostics/firmware-capture-error.txt"
+          import hashlib
+          import json
+          import os
+          import re
+          import stat
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          from glob import glob
+
+          output_dir = sys.argv[1]
+          uri = "qemu:///session"
+          domain_pattern = re.compile(r"^bootc-tmt-[A-Za-z0-9-]+$")
+
+          def command(*args, timeout=10):
+              try:
+                  result = subprocess.run(args, text=True, capture_output=True, timeout=timeout)
+              except Exception as error:
+                  return None, str(error)
+              if result.returncode:
+                  return None, result.stderr.strip()[:1024] or f"exit status {result.returncode}"
+              return result.stdout, None
+
+          def element(node):
+              if node is None:
+                  return None
+              value = {"attributes": dict(sorted(node.attrib.items()))}
+              if node.text and node.text.strip():
+                  value["path"] = node.text.strip()
+              return value
+
+          def file_evidence(path, max_size):
+              if not path:
+                  return None
+              evidence = {"path": path, "maximum_bytes": max_size}
+              try:
+                  info = os.stat(path)
+                  evidence["mode"] = format(stat.S_IMODE(info.st_mode), "#05o")
+                  evidence["size"] = info.st_size
+                  if not stat.S_ISREG(info.st_mode):
+                      evidence["error"] = "not a regular file"
+                      return evidence
+                  if info.st_size > max_size:
+                      evidence["error"] = "file exceeds capture hash limit"
+                      return evidence
+                  digest = hashlib.sha256()
+                  with open(path, "rb") as source:
+                      for block in iter(lambda: source.read(1024 * 1024), b""):
+                          digest.update(block)
+                  evidence["sha256"] = digest.hexdigest()
+              except OSError as error:
+                  evidence["error"] = str(error)
+                  return evidence
+              owner, owner_error = command("dpkg-query", "-S", path)
+              if owner_error:
+                  evidence["dpkg_owner_error"] = owner_error
+              else:
+                  evidence["dpkg_owner"] = owner.strip()[:1024]
+              return evidence
+
+          def disk_evidence(path):
+              if not path:
+                  return None
+              output, error = command("qemu-img", "info", "-U", "--output=json", path)
+              if error:
+                  return {"path": path, "error": error}
+              try:
+                  image = json.loads(output)
+              except json.JSONDecodeError as error:
+                  return {"path": path, "error": f"invalid qemu-img JSON: {error}"}
+              return {
+                  "path": path,
+                  "format": image.get("format"),
+                  "virtual_size": image.get("virtual-size"),
+                  "actual_size": image.get("actual-size"),
+                  "backing_filename": image.get("backing-filename"),
+                  "backing_format": image.get("backing-filename-format"),
+                  "full_backing_filename": image.get("full-backing-filename"),
+              }
+
+          def matching_firmware_descriptors(loader_path):
+              if not loader_path:
+                  return []
+              selected = os.path.realpath(loader_path)
+              matches = []
+              for descriptor in sorted(glob("/usr/share/qemu/firmware/*.json")):
+                  try:
+                      if os.path.getsize(descriptor) > 64 * 1024:
+                          continue
+                      with open(descriptor, encoding="utf-8") as source:
+                          document = json.load(source)
+                      executable = document.get("mapping", {}).get("executable", {}).get("filename")
+                      if executable and os.path.realpath(executable) == selected:
+                          matches.append({
+                              "filename": os.path.basename(descriptor),
+                              "features": document.get("features", []),
+                              "executable": executable,
+                          })
+                  except (OSError, json.JSONDecodeError):
+                      continue
+              return matches
+
+          def write(name, data):
+              with open(os.path.join(output_dir, name), "w", encoding="utf-8") as destination:
+                  json.dump(data, destination, indent=2, sort_keys=True)
+                  destination.write("\n")
+
+          names, error = command("virsh", "--connect", uri, "list", "--all", "--name")
+          if error:
+              write("firmware-capture-index.json", {"error": error})
+              raise SystemExit(0)
+          domains = [name for name in names.splitlines() if domain_pattern.fullmatch(name)]
+          index = {"domains": domains}
+          if len(domains) != 1:
+              index["capture_state"] = "rejected"
+              index["error"] = "expected exactly one bootc-tmt domain"
+          write("firmware-capture-index.json", index)
+          if len(domains) != 1:
+              raise SystemExit(0)
+
+          for name in domains:
+              data = {"name": name}
+              state, error = command("virsh", "--connect", uri, "domstate", "--reason", name)
+              data["domstate_reason"] = state.strip() if state else None
+              if error:
+                  data["domstate_error"] = error
+              xml, error = command("virsh", "--connect", uri, "dumpxml", "--inactive", name)
+              if error:
+                  data["dumpxml_error"] = error
+                  write(f"firmware-{name}.json", data)
+                  continue
+              try:
+                  root = ET.fromstring(xml)
+              except ET.ParseError as error:
+                  data["dumpxml_error"] = f"XML parse error: {error}"
+                  write(f"firmware-{name}.json", data)
+                  continue
+
+              os_node = root.find("./os")
+              loader = os_node.find("./loader") if os_node is not None else None
+              nvram = os_node.find("./nvram") if os_node is not None else None
+              disks = []
+              for disk in root.findall("./devices/disk"):
+                  source = disk.find("./source")
+                  source_path = source.get("file") if source is not None else None
+                  disks.append({
+                      "attributes": dict(sorted(disk.attrib.items())),
+                      "driver": element(disk.find("./driver")),
+                      "source": element(source),
+                      "target": element(disk.find("./target")),
+                      "boot": element(disk.find("./boot")),
+                      "qemu_image": disk_evidence(source_path),
+                  })
+              interfaces = []
+              for interface in root.findall("./devices/interface"):
+                  interfaces.append({
+                      "attributes": dict(sorted(interface.attrib.items())),
+                      "mac": element(interface.find("./mac")),
+                      "model": element(interface.find("./model")),
+                      "source": element(interface.find("./source")),
+                      "target": element(interface.find("./target")),
+                  })
+              consoles = []
+              for device in root.findall("./devices/serial") + root.findall("./devices/console"):
+                  source = device.find("./source")
+                  consoles.append({
+                      "kind": device.tag,
+                      "attributes": dict(sorted(device.attrib.items())),
+                      "source": element(source),
+                      "target": element(device.find("./target")),
+                  })
+              firmware_features = []
+              if os_node is not None:
+                  for feature in os_node.findall("./firmware/*"):
+                      firmware_features.append({"name": feature.tag, "attributes": dict(sorted(feature.attrib.items()))})
+              loader_path = loader.text.strip() if loader is not None and loader.text else None
+              nvram_path = nvram.text.strip() if nvram is not None and nvram.text else None
+              nvram_source = nvram.find("./source") if nvram is not None else None
+              if not nvram_path and nvram_source is not None:
+                  nvram_path = nvram_source.get("file")
+              stateless = loader is not None and loader.get("stateless") == "yes"
+              descriptors = matching_firmware_descriptors(loader_path)
+              capture_errors = []
+              if not loader_path:
+                  capture_errors.append("missing resolved firmware loader path")
+              if not nvram_path and not stateless:
+                  capture_errors.append("missing resolved NVRAM path")
+              if loader_path and not descriptors:
+                  capture_errors.append("no packaged firmware descriptor matches the selected loader")
+              data.update({
+                  "memory": element(root.find("./memory")),
+                  "os": {
+                      "attributes": dict(sorted(os_node.attrib.items())) if os_node is not None else {},
+                      "type": element(os_node.find("./type")) if os_node is not None else None,
+                      "firmware_features": firmware_features,
+                      "loader": element(loader),
+                      "nvram": element(nvram),
+                      "nvram_source": element(nvram_source),
+                      "boot": [element(boot) for boot in os_node.findall("./boot")] if os_node is not None else [],
+                  },
+                  "domain_smm": element(root.find("./features/smm")),
+                  "emulator": element(root.find("./devices/emulator")),
+                  "disks": disks,
+                  "interfaces": interfaces,
+                  "serial_consoles": consoles,
+                  "firmware_descriptors": descriptors,
+                  "resolved_files": {
+                      "loader": file_evidence(loader_path, 8 * 1024 * 1024),
+                      "nvram": file_evidence(nvram_path, 16 * 1024 * 1024),
+                      "nvram_template": file_evidence(nvram.get("template") if nvram is not None else None, 16 * 1024 * 1024),
+                  },
+                  "capture_state": "complete" if not capture_errors else "incomplete",
+                  "capture_errors": capture_errors,
+              })
+              write(f"firmware-{name}.json", data)
+          PY
+
+      - name: Capture Upterm session state
+        if: always()
+        run: |
+          set -uo pipefail
+          diagnostics="$RUNNER_TEMP/reproduction-diagnostics"
+          install -d -m 700 "$diagnostics"
+          upterm_tmp=$(node -p 'require("os").tmpdir()')
+          shopt -s nullglob
+          sockets=("$upterm_tmp"/upterm-data/runtime/upterm/*.sock)
+          {
+            if [[ "${#sockets[@]}" -ne 1 ]]; then
+              printf '%s\n' 'Upterm admin socket unavailable.'
+            else
+              upterm session current --admin-socket "${sockets[0]}" 2>&1 |
+                grep -oE 'SHA256:[A-Za-z0-9+/=]+' | sort -u || true
+            fi
+          } > "$diagnostics/upterm-session-state.txt"
+
       - name: Archive safe diagnostics
         if: always()
         uses: actions/upload-artifact@v7
@@ -298,6 +543,7 @@ jobs:
           retention-days: 7
           path: |
             ${{ runner.temp }}/reproduction-diagnostics/*.txt
+            ${{ runner.temp }}/reproduction-diagnostics/*.json
             /var/tmp/tmt/**/*.log
             /var/tmp/tmt/**/output.txt
             /var/tmp/tmt/**/console.txt
