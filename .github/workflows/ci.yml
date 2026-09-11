@@ -609,6 +609,19 @@ jobs:
           EOF
           chmod 600 "$HOME/.ssh/known_hosts"
 
+          # Upterm changes XDG directories for its own sockets. Restore only
+          # these known variables before reproducing a rootless Podman build
+          # interactively, rather than inheriting Upterm's runtime directory.
+          environment_file="$RUNNER_TEMP/upterm-ci-environment.sh"
+          for variable in XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_STATE_HOME DBUS_SESSION_BUS_ADDRESS; do
+            if [[ -v "$variable" ]]; then
+              printf 'export %s=%q\n' "$variable" "${!variable}"
+            else
+              printf 'unset %s\n' "$variable"
+            fi
+          done > "$environment_file"
+          chmod 600 "$environment_file"
+
       - name: Preflight Upterm relay
         if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_upterm == true }}
         run: |
@@ -620,7 +633,8 @@ jobs:
         id: upterm
         if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'cgwalters-bot/bootc' && github.actor == 'cgwalters-bot' && inputs.ubuntu2604_fork_test == true && inputs.debug_upterm == true }}
         uses: owenthereal/action-upterm@47652056242288ccbebd30f836e9885d09a75365 # v1.15.0
-        timeout-minutes: 5
+        # This limit also applies to the action's post-job session wait.
+        timeout-minutes: 30
         env:
           UPTERM_AUTHORIZED_KEYS: ${{ runner.temp }}/upterm-authorized-keys
         with:
