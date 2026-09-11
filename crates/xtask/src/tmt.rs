@@ -13,6 +13,9 @@ const PLAN_MARKER_END: &str = "# END GENERATED PLANS\n";
 const VM_READY_TIMEOUT_SECS: u64 = 60;
 const SSH_CONNECTIVITY_MAX_ATTEMPTS: u32 = 60;
 const SSH_CONNECTIVITY_RETRY_DELAY_SECS: u64 = 3;
+const SSH_COMMAND_TIMEOUT_SECS: u64 = 15;
+const SSH_COMMAND_KILL_GRACE_SECS: u64 = 2;
+const SSH_DIAGNOSTIC_TAIL_CHARS: usize = 8 * 1024;
 
 // Base args - firmware type will be added dynamically based on secure boot key availability
 const COMMON_INST_ARGS: &[&str] = &["--label=bootc.test=1"];
@@ -228,21 +231,34 @@ fn verify_ssh_connectivity(sh: &Shell, port: u16, key_path: &Utf8Path) -> Result
     use std::time::Duration;
 
     let port_str = port.to_string();
+    let command_timeout = format!("{SSH_COMMAND_TIMEOUT_SECS}s");
+    let command_kill_grace = format!("{SSH_COMMAND_KILL_GRACE_SECS}s");
+    let mut last_status = None;
+    let mut last_stdout = String::new();
+    let mut last_stderr = String::new();
     for attempt in 1..=SSH_CONNECTIVITY_MAX_ATTEMPTS {
         // Test with a complex command like TMT uses (exports + whoami)
         // Use IdentitiesOnly=yes to prevent ssh-agent from offering other keys
         let result = cmd!(
             sh,
-            "ssh -i {key_path} -p {port_str} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o IdentitiesOnly=yes root@localhost 'export TEST=value; whoami'"
+            "timeout --signal=TERM --kill-after={command_kill_grace} {command_timeout} ssh -i {key_path} -p {port_str} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o IdentitiesOnly=yes root@localhost 'export TEST=value; whoami'"
         )
-        .ignore_stderr()
-        .read();
+        .output();
 
-        match &result {
-            Ok(output) if output.trim() == "root" => {
-                return Ok(());
+        match result {
+            Ok(output) => {
+                last_status = output.status.code();
+                last_stdout = bounded_tail(&String::from_utf8_lossy(&output.stdout));
+                last_stderr = bounded_tail(&String::from_utf8_lossy(&output.stderr));
+                if ssh_output_is_ready(output.status.success(), &last_stdout) {
+                    return Ok(());
+                }
             }
-            _ => {}
+            Err(error) => {
+                last_status = None;
+                last_stdout.clear();
+                last_stderr = bounded_tail(&error.to_string());
+            }
         }
 
         if attempt % 10 == 0 {
@@ -258,9 +274,44 @@ fn verify_ssh_connectivity(sh: &Shell, port: u16, key_path: &Utf8Path) -> Result
     }
 
     anyhow::bail!(
-        "SSH connectivity check failed after {} attempts",
-        SSH_CONNECTIVITY_MAX_ATTEMPTS
+        "SSH connectivity check failed after {} attempts (last exit status: {:?}, last stdout: {:?}, last stderr: {:?})",
+        SSH_CONNECTIVITY_MAX_ATTEMPTS,
+        last_status,
+        last_stdout,
+        last_stderr,
     )
+}
+
+fn bounded_tail(value: &str) -> String {
+    value
+        .chars()
+        .rev()
+        .take(SSH_DIAGNOSTIC_TAIL_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn ssh_output_is_ready(status_success: bool, stdout: &str) -> bool {
+    status_success && stdout.trim() == "root"
+}
+
+/// Print bounded host-side state before removing a VM which never became reachable.
+fn collect_vm_readiness_diagnostics(sh: &Shell, vm_name: &str) {
+    println!("\n--- libvirt state for {vm_name} ---");
+    let _ = cmd!(
+        sh,
+        "timeout 10s virsh --connect qemu:///session domstate --reason {vm_name}"
+    )
+    .ignore_status()
+    .run();
+    let _ = cmd!(
+        sh,
+        "timeout 10s virsh --connect qemu:///session dominfo {vm_name}"
+    )
+    .ignore_status()
+    .run();
 }
 
 #[derive(Debug, Default)]
@@ -514,11 +565,12 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
 
     // Probe whether this bcvk supports --log-dir (added in bcvk 0.17).
     // Older installs silently lack it; we skip the flag rather than hard-failing.
-    let bcvk_has_log_dir = cmd!(sh, "bcvk libvirt run --help")
+    let bcvk_help = cmd!(sh, "bcvk libvirt run --help")
         .ignore_stderr()
         .read()
-        .map(|help| help.contains("--log-dir"))
-        .unwrap_or(false);
+        .unwrap_or_default();
+    let bcvk_has_log_dir = bcvk_help.contains("--log-dir");
+    let bcvk_has_platform_console_log = bcvk_help.contains("--platform-console-log");
 
     // Generate a random suffix for VM names
     let random_suffix = generate_random_suffix();
@@ -586,11 +638,25 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
 
         // Set up per-VM log directory for journal + console capture (if bcvk supports it)
         let vm_log_dir = base_log_dir.join(&vm_name);
-        let log_dir_args: Vec<String> = if bcvk_has_log_dir {
+        let vm_log_dir = if bcvk_has_log_dir || bcvk_has_platform_console_log {
             std::fs::create_dir_all(&vm_log_dir)
                 .with_context(|| format!("Creating VM log directory {}", vm_log_dir))?;
+            vm_log_dir
+                .canonicalize_utf8()
+                .with_context(|| format!("Canonicalizing VM log directory {}", vm_log_dir))?
+        } else {
+            vm_log_dir
+        };
+        let log_dir_args: Vec<String> = if bcvk_has_log_dir {
             println!("VM logs will be written to: {}", vm_log_dir);
             vec![format!("--log-dir=journal,console={}", vm_log_dir)]
+        } else {
+            vec![]
+        };
+
+        let platform_console_args: Vec<String> = if bcvk_has_platform_console_log {
+            let platform_console_log = vm_log_dir.join("platform-console.txt");
+            vec![format!("--platform-console-log={platform_console_log}")]
         } else {
             vec![]
         };
@@ -599,7 +665,7 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
         let firmware_args_slice = firmware_args.as_slice();
         let launch_result = cmd!(
             sh,
-            "bcvk libvirt run --name {vm_name} --detach {firmware_args_slice...} {COMMON_INST_ARGS...} {plan_bcvk_opts...} {log_dir_args...} {image}"
+            "bcvk libvirt run --name {vm_name} --detach {firmware_args_slice...} {COMMON_INST_ARGS...} {plan_bcvk_opts...} {log_dir_args...} {platform_console_args...} {image}"
         )
         .run()
         .context("Launching VM with bcvk");
@@ -703,10 +769,16 @@ pub(crate) fn run_tmt(sh: &Shell, args: &RunTmtArgs) -> Result<()> {
             eprintln!("SSH verification failed for plan {}: {:#}", plan, e);
             if bcvk_has_log_dir {
                 eprintln!(
-                    "VM logs (journal + console) may be available at: {}",
+                    "VM logs (journal + console{}) may be available at: {}",
+                    if bcvk_has_platform_console_log {
+                        " + platform console"
+                    } else {
+                        ""
+                    },
                     vm_log_dir
                 );
             }
+            collect_vm_readiness_diagnostics(sh, &vm_name);
             cleanup_vm();
             all_passed = false;
             test_results.push((plan.to_string(), false, None));
@@ -1413,6 +1485,29 @@ fn generate_integration() -> Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bounded_tail_preserves_recent_unicode() {
+        let input = format!("{}{}", "a".repeat(SSH_DIAGNOSTIC_TAIL_CHARS), "終わり");
+        assert_eq!(
+            bounded_tail(&input),
+            "a".repeat(SSH_DIAGNOSTIC_TAIL_CHARS - 3) + "終わり"
+        );
+    }
+
+    #[test]
+    fn test_bounded_tail_does_not_prefer_old_output() {
+        let input = format!("old output\n{}", "x".repeat(SSH_DIAGNOSTIC_TAIL_CHARS));
+        assert!(!bounded_tail(&input).contains("old output"));
+        assert_eq!(bounded_tail(&input).len(), SSH_DIAGNOSTIC_TAIL_CHARS);
+    }
+
+    #[test]
+    fn test_ssh_output_requires_successful_status_and_root() {
+        assert!(ssh_output_is_ready(true, "root\n"));
+        assert!(!ssh_output_is_ready(false, "root\n"));
+        assert!(!ssh_output_is_ready(true, "not-root\n"));
+    }
 
     #[test]
     fn test_boot_context_values() {
