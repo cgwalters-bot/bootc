@@ -164,18 +164,19 @@ a `bootc` kickstart command that drives `to-filesystem` this way.
 
 #### Postprocessing after to-filesystem
 
-Some installation tools may want to inject additional data, such as adding
-an `/etc/hostname` into the target root. At the current time, bootc does
-not offer a direct API to do this. However, the backend for bootc is
-ostree, and it is possible to enumerate the deployments via ostree APIs.
+Some installation tools may want to inject additional data, such as adding an
+`/etc/hostname` into the target root. Use bootc's backend-neutral, read-only
+status API to find the writable backing directories:
 
-You can use `ostree admin --sysroot=/path/to/target --print-current-dir` to
-find the newly created deployment directory. For detailed examples and usage,
-see the [Injecting configuration before first boot](#before-reboot-injecting-new-configuration)
-section under `to-existing-root` documentation below.
+```bash
+bootc status --sysroot /path/to/target --json
+```
 
-We hope to provide a bootc-supported method to find the deployment in
-the future.
+The returned `status.defaultDeployment.stateDirectories.etc` and `.var` are
+the paths to modify. This works for both OSTree and composefs targets without
+mounting or chrooting the deployment; `status.defaultDeployment.backend`
+identifies the selected backend. The target is unbooted, so `status.booted`
+remains `null`.
 
 However, for tools that do perform any changes, there is a new
 `bootc install finalize` command which is optional, but recommended
@@ -251,22 +252,17 @@ previous installation.
 ##### Before reboot: Injecting new configuration
 
 After running `bootc install to-existing-root`, you may want to inject
-configuration files (such as `/etc/fstab`, systemd units, or other configuration)
-into the newly installed system before rebooting. The new deployment is located
-in the ostree repository structure at:
-
-`/target/ostree/deploy/<stateroot>/deploy/<checksum>.<serial>/`
-
-Where `<stateroot>` defaults to `default` unless specified via `--stateroot`.
-
-To find and modify the newly installed deployment:
+configuration files (such as `/etc/fstab`, systemd units, or other
+configuration) into the newly installed system before rebooting. Discover the
+target's writable `/etc` backing path first:
 
 ```bash
-# Get the deployment path
-DEPLOY_PATH=$(ostree admin --sysroot=/target --print-current-dir)
+# Get the deployment's writable /etc path
+DEPLOY_PATH=$(bootc status --sysroot /target --json | jq -r \
+  '.status.defaultDeployment.stateDirectories.etc')
 
 # Add a systemd mount unit
-cat > ${DEPLOY_PATH}/etc/systemd/system/data.mount <<EOF
+cat > ${DEPLOY_PATH}/systemd/system/data.mount <<EOF
 [Unit]
 Description=Data partition
 
@@ -461,19 +457,13 @@ for legacy `/etc/fstab` references for `/` to use
 
 ## Configuring machine-local state
 
-Per the [filesystem](filesystem.md) section, `/etc` and `/var` are machine-local
-state by default.  If you want to inject additional content after the installation
-process, at the current time this can be done by manually finding the
-target "deployment root" which will be underneath `/ostree/deploy/<stateroot>/deploy/`.
-
-You can use `ostree admin --sysroot=/path/to/target --print-current-dir` to find
-the deployment directory. For detailed examples, see
-[Injecting configuration before first boot](#before-reboot-injecting-new-configuration).
-
-Installation software such as [Anaconda](https://github.com/rhinstaller/anaconda)
-do this today to implement generic `%post` scripts and the like.
-
-However, it is very likely that a generic bootc API to do this will be added.
+Per the [filesystem](filesystem.md) section, `/etc` and `/var` are
+machine-local state by default. To inject additional content after installation,
+query `bootc status --sysroot /path/to/target --json` and use
+`status.defaultDeployment.stateDirectories.etc` or `.var`. This is the
+backend-neutral API for installation software such as
+[Anaconda](https://github.com/rhinstaller/anaconda) to implement `%post`
+scripts before first boot.
 
 ## Provisioning and first boot
 

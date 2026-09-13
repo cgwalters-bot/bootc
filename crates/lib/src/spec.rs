@@ -456,6 +456,43 @@ pub struct HostStatus {
     /// the system (upgrade, switch, etc.) are not available.
     #[serde(default)]
     pub read_only: bool,
+
+    /// The default deployment on an unbooted target sysroot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub default_deployment: Option<DefaultDeployment>,
+}
+
+/// Writable state backing an unbooted deployment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StateDirectories {
+    /// Backing directory for `/etc`.
+    pub etc: String,
+    /// Backing directory for `/var`.
+    pub var: String,
+}
+
+/// The target-local default deployment selected for post-install injection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultDeployment {
+    /// Storage backend owning this deployment.
+    pub backend: DeploymentBackend,
+    /// Backend-specific deployment identifier.
+    pub id: String,
+    /// Writable state backing paths, without mounting the deployment.
+    pub state_directories: StateDirectories,
+}
+
+/// Storage backend for an unbooted deployment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentBackend {
+    /// OSTree deployment storage.
+    Ostree,
+    /// Native composefs deployment storage.
+    Composefs,
 }
 
 pub(crate) struct DeploymentEntry<'a> {

@@ -286,6 +286,10 @@ pub(crate) struct StatusOpts {
     #[clap(long)]
     pub(crate) booted: bool,
 
+    /// Inspect an unbooted target sysroot. The path must be absolute; use --json or --format=yaml.
+    #[clap(long, value_parser = parse_absolute_path, conflicts_with = "booted")]
+    pub(crate) sysroot: Option<Utf8PathBuf>,
+
     /// Include additional fields in human readable format.
     #[clap(long, short = 'v')]
     pub(crate) verbose: bool,
@@ -2759,6 +2763,7 @@ mod tests {
                 format: None,
                 format_version: None,
                 booted: false,
+                sysroot: None,
                 verbose: false
             })
         ));
@@ -2781,6 +2786,19 @@ mod tests {
             Opt::parse_including_static(["bootc", "status", "-v"]),
             Opt::Status(StatusOpts { verbose: true, .. })
         ));
+
+        let opt =
+            Opt::try_parse_from(["bootc", "status", "--sysroot", "/target", "--json"]).unwrap();
+        assert!(matches!(
+            opt,
+            Opt::Status(StatusOpts { sysroot: Some(path), json: true, .. }) if path == "/target"
+        ));
+        for args in [
+            vec!["bootc", "status", "--sysroot", "target"],
+            vec!["bootc", "status", "--sysroot", "/target", "--booted"],
+        ] {
+            assert!(Opt::try_parse_from(args).is_err());
+        }
     }
 
     #[test]
