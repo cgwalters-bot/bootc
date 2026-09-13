@@ -1303,6 +1303,43 @@ mod tests {
     }
 
     #[test]
+    fn test_offline_composefs_status_does_not_repair_missing_compat_link() -> Result<()> {
+        let root = composefs_fixture()?;
+        root.remove_file("ostree/bootc")?;
+        let state_path = format!("state/deploy/{COMPOSEFS_ID}/etc");
+        let before = root.metadata(&state_path)?;
+
+        let host = offline_status_from_root(&root, Utf8Path::new("/target"))?;
+
+        assert_eq!(
+            root.symlink_metadata("ostree/bootc").unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+            "offline status must not repair the compatibility link"
+        );
+        let after = root.metadata(&state_path)?;
+        assert_eq!(
+            (
+                before.mtime(),
+                before.mtime_nsec(),
+                before.ctime(),
+                before.ctime_nsec()
+            ),
+            (
+                after.mtime(),
+                after.mtime_nsec(),
+                after.ctime(),
+                after.ctime_nsec()
+            ),
+            "offline status must not modify native deployment state"
+        );
+        assert_eq!(
+            host.status.default_deployment.as_ref().unwrap().backend,
+            DeploymentBackend::Composefs
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_offline_composefs_rejects_invalid_state() -> Result<()> {
         for case in [
             "multiple",
