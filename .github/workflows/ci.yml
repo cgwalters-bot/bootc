@@ -74,7 +74,7 @@ jobs:
           printf '%s\n' 'Upstream metadata authenticated; attempting artifact reuse.'
 
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@347adb4511da29d5d788c38dc80a517155466c67
+        uses: cgwalters-bot/actions/bootc-ubuntu-setup@2828e4258d6af808cce5ea41d436704156e7db74
 
       - name: Setup CentOS 10 source environment
         run: |
@@ -151,7 +151,7 @@ jobs:
             ':(exclude)crates/xtask/src/tmt.rs'
 
       - name: Bootc Ubuntu Setup
-        uses: bootc-dev/actions/bootc-ubuntu-setup@347adb4511da29d5d788c38dc80a517155466c67
+        uses: cgwalters-bot/actions/bootc-ubuntu-setup@2828e4258d6af808cce5ea41d436704156e7db74
         with:
           libvirt: true
 
