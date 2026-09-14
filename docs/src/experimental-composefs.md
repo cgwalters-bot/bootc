@@ -274,35 +274,13 @@ Composefs installs using a traditional `vmlinuz`/`initramfs.img` layout instead 
 
 There is a `--composefs-backend` option for `bootc install` to explicitly select a composefs backend apart from sealed images; this is not as heavily tested yet.
 
-### Post-install state discovery
+### Explicit post-install mounts
 
-An installer can discover writable backing paths without mounting or chrooting
-the target:
-
-```bash
-bootc status --sysroot /target --json
-```
-
-`--format=yaml` is also available; the human-readable format is intentionally
-rejected for `--sysroot`.
-
-For an unbooted target, the additive `status.defaultDeployment` object reports
-the selected backend, its deployment ID, and
-`stateDirectories.etc` and `stateDirectories.var`. These are direct backing
-directories suitable for post-install content injection. For composefs,
-`var` is the shared `state/os/default/var` directory, not the per-deployment
-`var` symlink.
-
-This is target-local, read-only discovery. It does not inspect host command
-line or runtime state, mount an ESP, migrate boot entries, or create locks.
-It deliberately does not claim to provide a complete offline status view, and
-does not set `status.booted`. A composefs target with more than one valid
-deployment is rejected rather than selected by filename or timestamp; use
-target-local boot metadata or resolve the target before invoking the command.
-Composefs is identified by its storage directory; OSTree is identified by a
-real `ostree/repo`, not the composefs `ostree/bootc` compatibility namespace.
-If both backend markers are present, the command errors rather than guessing.
-This is not a complete offline host-status API.
+Post-install tools use an explicit caller-owned mount rather than a status
+schema. `bootc install mount --sysroot /target /mnt/installed` mounts a single
+unambiguous deployment read-only and leaves it in the caller's namespace.
+`--writable` enables only persistent `/etc` and `/var`; the immutable root and
+`/usr` remain read-only. The caller must unmount the target before finalization.
 
 ## Stabilization status
 
@@ -413,11 +391,10 @@ bootc 1.16.0 fixtures and configurations tested above.
 
 ### Pending work that is not, by itself, a stability blocker
 
-- **Mount/install API consumers:** the narrow status discovery API supports
-  pre-reboot `/etc` and `/var` injection. General mount APIs and broader
-  post-mutation consumers remain separate work (see also
-  [#522](https://github.com/bootc-dev/bootc/issues/522)); they should not
-  depend on mounting deployment directories as a stable API.
+- **Mount/install API consumers:** the explicit caller-owned mount interface
+  supports pre-reboot `/etc` and `/var` injection. Broader post-mutation
+  consumers remain separate work (see also
+  [#522](https://github.com/bootc-dev/bootc/issues/522)).
 - **V2 test controls:** `BOOTC_erofs_version` is a TMT image-build control,
   not an install API. The verified historical bridge coverage remains opt-in
   until fixture production is reproducible.

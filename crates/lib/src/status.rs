@@ -17,19 +17,12 @@ use ostree_ext::oci_spec::image::ImageConfiguration;
 use ostree_ext::sysroot::SysrootLock;
 use unicode_width::UnicodeWidthStr;
 
-use camino::Utf8Path;
-use cap_std_ext::{cap_std, dirext::CapStdExtDirExt};
-use ostree::gio;
-
 use ostree_ext::ostree;
 
 use crate::cli::OutputFormat;
 use crate::spec::BootEntryComposefs;
 use crate::spec::ImageStatus;
-use crate::spec::{
-    BootEntry, BootOrder, DefaultDeployment, DeploymentBackend, Host, HostSpec, HostStatus,
-    HostType, StateDirectories,
-};
+use crate::spec::{BootEntry, BootOrder, Host, HostSpec, HostStatus, HostType};
 use crate::spec::{ImageReference, ImageSignature};
 use crate::store::BootedStorage;
 use crate::store::BootedStorageKind;
@@ -446,7 +439,6 @@ pub(crate) fn get_status(
         usr_overlay,
         // Set by callers that have storage context (e.g. get_host).
         read_only: false,
-        default_deployment: None,
     };
     Ok((deployments, host))
 }
@@ -494,11 +486,7 @@ pub(crate) async fn status(opts: super::cli::StatusOpts) -> Result<()> {
         0 | 1 => {}
         o => anyhow::bail!("Unsupported format version: {o}"),
     };
-    let mut host = if let Some(sysroot) = opts.sysroot.as_deref() {
-        offline_status(sysroot)?
-    } else {
-        get_host().await?
-    };
+    let mut host = get_host().await?;
 
     // We could support querying the staged or rollback deployments
     // here too, but it's not a common use case at the moment.
@@ -519,9 +507,6 @@ pub(crate) async fn status(opts: super::cli::StatusOpts) -> Result<()> {
         OutputFormat::Yaml
     };
     let format = opts.format.unwrap_or(legacy_opt);
-    if opts.sysroot.is_some() && format == OutputFormat::HumanReadable {
-        anyhow::bail!("--sysroot requires --json or --format=yaml");
-    }
     match format {
         OutputFormat::Json => host
             .to_canon_json_writer(&mut out)
@@ -532,161 +517,6 @@ pub(crate) async fn status(opts: super::cli::StatusOpts) -> Result<()> {
     .context("Writing to stdout")?;
 
     Ok(())
-}
-
-/// Inspect an unbooted sysroot without consulting host state or mounting anything.
-fn offline_status(sysroot: &Utf8Path) -> Result<Host> {
-    let root = cap_std::fs::Dir::open_ambient_dir(sysroot, cap_std::ambient_authority())
-        .with_context(|| format!("Opening target sysroot {sysroot}"))?;
-    offline_status_from_root(&root, sysroot)
-}
-
-fn offline_status_from_root(root: &cap_std::fs::Dir, sysroot: &Utf8Path) -> Result<Host> {
-    let has_composefs = directory_marker(root, "composefs")?;
-    let has_ostree = ostree_repository_marker(root)?;
-
-    let default_deployment = match (has_composefs, has_ostree) {
-        (true, false) => composefs_default_deployment(root, sysroot)?,
-        (false, true) => ostree_default_deployment(root, sysroot)?,
-        (true, true) => anyhow::bail!(
-            "Target sysroot has both composefs and OSTree repository markers; refusing to guess its backend"
-        ),
-        (false, false) => {
-            anyhow::bail!("Target sysroot has neither a composefs nor an OSTree repository marker")
-        }
-    };
-    let mut host = Host::default();
-    host.status.default_deployment = Some(default_deployment);
-    Ok(host)
-}
-
-fn directory_marker(root: &cap_std::fs::Dir, path: &str) -> Result<bool> {
-    Ok(root
-        .symlink_metadata_optional(path)?
-        .is_some_and(|metadata| metadata.is_dir()))
-}
-
-/// A composefs install creates `ostree/bootc` only as a compatibility link.
-/// Treat OSTree as a backend marker only when its repository is present.
-fn ostree_repository_marker(root: &cap_std::fs::Dir) -> Result<bool> {
-    if !directory_marker(root, "ostree")? {
-        return Ok(false);
-    }
-    let ostree = root.open_dir("ostree")?;
-    directory_marker(&ostree, "repo")
-}
-
-fn require_directory(root: &cap_std::fs::Dir, path: &str) -> Result<cap_std::fs::Dir> {
-    let metadata = root
-        .symlink_metadata_optional(path)?
-        .ok_or_else(|| anyhow::anyhow!("Missing required directory {path}"))?;
-    if !metadata.is_dir() {
-        anyhow::bail!("Expected {path} to be a directory, not a symbolic link or file");
-    }
-    root.open_dir(path).map_err(Into::into)
-}
-
-fn composefs_default_deployment(
-    root: &cap_std::fs::Dir,
-    sysroot: &Utf8Path,
-) -> Result<DefaultDeployment> {
-    let deployments =
-        require_directory(root, "state/deploy").context("Invalid composefs deployment state")?;
-    let _shared_var = require_directory(root, "state/os/default/var")
-        .context("Invalid composefs shared /var state")?;
-
-    let mut candidates = Vec::new();
-    for entry in deployments.entries()? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(id) = name.to_str() else {
-            continue;
-        };
-        if !is_composefs_deployment_id(id) {
-            continue;
-        }
-        let metadata = deployments.symlink_metadata(id)?;
-        if !metadata.is_dir() {
-            anyhow::bail!("Composefs deployment {id} is not a directory");
-        }
-        let deployment = deployments.open_dir(id)?;
-        require_directory(&deployment, "etc")
-            .with_context(|| format!("Invalid composefs /etc state for deployment {id}"))?;
-        candidates.push(id.to_owned());
-    }
-
-    let id = match candidates.as_slice() {
-        [id] => id,
-        [] => anyhow::bail!("No valid composefs deployment found in state/deploy"),
-        _ => anyhow::bail!(
-            "Multiple composefs deployments found in state/deploy; cannot select one without target-local boot metadata"
-        ),
-    };
-    Ok(DefaultDeployment {
-        backend: DeploymentBackend::Composefs,
-        id: id.clone(),
-        state_directories: StateDirectories {
-            etc: sysroot.join("state/deploy").join(id).join("etc").into(),
-            var: sysroot.join("state/os/default/var").into(),
-        },
-    })
-}
-
-fn is_composefs_deployment_id(id: &str) -> bool {
-    id.as_bytes().len() == 128 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn ostree_default_deployment(
-    root: &cap_std::fs::Dir,
-    sysroot_path: &Utf8Path,
-) -> Result<DefaultDeployment> {
-    let sysroot = ostree::Sysroot::new(Some(&gio::File::for_path(sysroot_path)));
-    sysroot
-        .load(gio::Cancellable::NONE)
-        .context("Loading target OSTree sysroot")?;
-    let deployment = sysroot
-        .deployments()
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No deployment found in target OSTree sysroot"))?;
-    let deployment_dir = sysroot.deployment_dirpath(&deployment);
-    let deployment_dir = deployment_dir.to_string();
-    let deployment_id = deployment_dir
-        .rsplit('/')
-        .next()
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Target OSTree deployment path has no deployment ID"))?
-        .to_owned();
-    require_directory(root, &format!("{deployment_dir}/etc"))
-        .context("Invalid target OSTree deployment /etc state")?;
-    let var_path = format!("ostree/deploy/{}/var", deployment.stateroot());
-    let state_directories = ostree_state_directories(
-        sysroot_path,
-        &deployment_dir,
-        deployment.stateroot().as_str(),
-    );
-    require_directory(root, &var_path).context("Invalid target OSTree /var state")?;
-
-    Ok(DefaultDeployment {
-        backend: DeploymentBackend::Ostree,
-        id: deployment_id,
-        state_directories,
-    })
-}
-
-fn ostree_state_directories(
-    sysroot: &Utf8Path,
-    deployment_dir: &str,
-    stateroot: &str,
-) -> StateDirectories {
-    StateDirectories {
-        etc: sysroot.join(deployment_dir).join("etc").into(),
-        var: sysroot
-            .join("ostree/deploy")
-            .join(stateroot)
-            .join("var")
-            .into(),
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1176,278 +1006,7 @@ pub(crate) fn container_inspect(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read as _;
-    use std::os::fd::{AsFd as _, AsRawFd as _};
-
-    use cap_std_ext::cap_std::fs::MetadataExt as _;
-    use cap_std_ext::{cap_std, cap_tempfile};
-    use ostree_ext::prelude::Cast;
-
     use super::*;
-
-    const COMPOSEFS_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    fn composefs_fixture() -> Result<cap_tempfile::TempDir> {
-        let root = cap_tempfile::tempdir(cap_std::ambient_authority())?;
-        root.create_dir_all("composefs")?;
-        root.create_dir_all("ostree")?;
-        // This may be dangling when logically bound images were not installed.
-        root.symlink_contents("../composefs/bootc", "ostree/bootc")?;
-        root.create_dir_all(format!("state/deploy/{COMPOSEFS_ID}/etc"))?;
-        root.create_dir_all("state/os/default/var")?;
-        Ok(root)
-    }
-
-    fn private_ostree_sysroot() -> Result<(tempfile::TempDir, String)> {
-        let target = tempfile::tempdir()?;
-        let sysroot = ostree::SysrootBuilder::new()
-            .path(Some(target.path().to_path_buf()))
-            .create(gio::Cancellable::NONE)?;
-        sysroot.init_osname("test", gio::Cancellable::NONE)?;
-        std::fs::create_dir(target.path().join("boot"))?;
-
-        let rootfs = cap_tempfile::tempdir(cap_std::ambient_authority())?;
-        rootfs.create_dir_all("usr/etc")?;
-        rootfs.create_dir_all("usr/lib")?;
-        rootfs.write("usr/lib/os-release", "ID=test\nVERSION_ID=1\n")?;
-        rootfs.create_dir_all("usr/lib/modules/1.0")?;
-        rootfs.write("usr/lib/modules/1.0/vmlinuz", "test kernel")?;
-        let repo = sysroot.repo();
-        let transaction = repo.auto_transaction(gio::Cancellable::NONE)?;
-        let mtree = ostree::MutableTree::new();
-        let modifier =
-            ostree::RepoCommitModifier::new(ostree::RepoCommitModifierFlags::SKIP_XATTRS, None);
-        repo.write_dfd_to_mtree(
-            rootfs.as_fd().as_raw_fd(),
-            ".",
-            &mtree,
-            Some(&modifier),
-            gio::Cancellable::NONE,
-        )?;
-        let root = repo
-            .write_mtree(&mtree, gio::Cancellable::NONE)?
-            .downcast::<ostree::RepoFile>()
-            .unwrap();
-        let commit = repo.write_commit(None, None, None, None, &root, gio::Cancellable::NONE)?;
-        transaction.commit(gio::Cancellable::NONE)?;
-
-        let deployment = sysroot.deploy_tree_with_options(
-            Some("test"),
-            &commit,
-            None,
-            None,
-            None,
-            gio::Cancellable::NONE,
-        )?;
-        sysroot.simple_write_deployment(
-            Some("test"),
-            &deployment,
-            None,
-            ostree::SysrootSimpleWriteDeploymentFlags::NONE,
-            gio::Cancellable::NONE,
-        )?;
-        Ok((target, commit.to_string()))
-    }
-
-    #[test]
-    fn test_offline_composefs_status() -> Result<()> {
-        let root = composefs_fixture()?;
-        let path = Utf8Path::new("/target");
-        root.write("snapshot", "unmodified")?;
-        let before = root.metadata("snapshot")?;
-        let mut before_contents = String::new();
-        root.open("snapshot")?
-            .read_to_string(&mut before_contents)?;
-        let host = offline_status_from_root(&root, path)?;
-        let after = root.metadata("snapshot")?;
-        let mut after_contents = String::new();
-        root.open("snapshot")?.read_to_string(&mut after_contents)?;
-        assert_eq!(
-            (
-                before.mtime(),
-                before.mtime_nsec(),
-                before.ctime(),
-                before.ctime_nsec()
-            ),
-            (
-                after.mtime(),
-                after.mtime_nsec(),
-                after.ctime(),
-                after.ctime_nsec()
-            ),
-            "offline inspection must not modify target metadata"
-        );
-        assert_eq!(
-            before_contents, after_contents,
-            "target file content changed"
-        );
-        assert!(host.status.booted.is_none());
-        let deployment = host.status.default_deployment.as_ref().unwrap();
-        assert_eq!(deployment.backend, DeploymentBackend::Composefs);
-        assert_eq!(deployment.id, COMPOSEFS_ID);
-        assert_eq!(
-            deployment.state_directories.etc,
-            path.join("state/deploy")
-                .join(COMPOSEFS_ID)
-                .join("etc")
-                .as_str()
-        );
-        assert_eq!(
-            deployment.state_directories.var,
-            path.join("state/os/default/var").as_str()
-        );
-        let json = serde_json::to_value(&host)?;
-        assert!(json["status"]["booted"].is_null());
-        assert_eq!(json["status"]["defaultDeployment"]["backend"], "composefs");
-        Ok(())
-    }
-
-    #[test]
-    fn test_offline_composefs_status_does_not_repair_missing_compat_link() -> Result<()> {
-        let root = composefs_fixture()?;
-        root.remove_file("ostree/bootc")?;
-        let state_path = format!("state/deploy/{COMPOSEFS_ID}/etc");
-        let before = root.metadata(&state_path)?;
-
-        let host = offline_status_from_root(&root, Utf8Path::new("/target"))?;
-
-        assert_eq!(
-            root.symlink_metadata("ostree/bootc").unwrap_err().kind(),
-            std::io::ErrorKind::NotFound,
-            "offline status must not repair the compatibility link"
-        );
-        let after = root.metadata(&state_path)?;
-        assert_eq!(
-            (
-                before.mtime(),
-                before.mtime_nsec(),
-                before.ctime(),
-                before.ctime_nsec()
-            ),
-            (
-                after.mtime(),
-                after.mtime_nsec(),
-                after.ctime(),
-                after.ctime_nsec()
-            ),
-            "offline status must not modify native deployment state"
-        );
-        assert_eq!(
-            host.status.default_deployment.as_ref().unwrap().backend,
-            DeploymentBackend::Composefs
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_offline_composefs_rejects_invalid_state() -> Result<()> {
-        for case in [
-            "multiple",
-            "malformed-id",
-            "missing-etc",
-            "missing-var",
-            "symlink",
-        ] {
-            let root = composefs_fixture()?;
-            match case {
-                "multiple" => {
-                    root.create_dir_all(format!("state/deploy/{}/etc", "f".repeat(128)))?
-                }
-                "malformed-id" => {
-                    root.create_dir_all("state/deploy/not-a-deployment/etc")?;
-                    root.remove_dir_all(format!("state/deploy/{COMPOSEFS_ID}"))?;
-                }
-                "missing-etc" => root.remove_dir_all(format!("state/deploy/{COMPOSEFS_ID}/etc"))?,
-                "missing-var" => root.remove_dir_all("state/os/default/var")?,
-                "symlink" => {
-                    root.remove_dir_all(format!("state/deploy/{COMPOSEFS_ID}/etc"))?;
-                    root.symlink_contents("/etc", format!("state/deploy/{COMPOSEFS_ID}/etc"))?;
-                }
-                _ => unreachable!(),
-            }
-            assert!(
-                offline_status_from_root(&root, Utf8Path::new("/target")).is_err(),
-                "case {case} must be rejected"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_status_json_remains_backward_compatible_without_target() -> Result<()> {
-        let value = serde_json::to_value(Host::default())?;
-        assert!(value["status"].get("defaultDeployment").is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn test_ostree_state_path_derivation() {
-        let state = ostree_state_directories(
-            Utf8Path::new("/target"),
-            "ostree/deploy/default/deploy/checksum.0",
-            "default",
-        );
-        assert_eq!(
-            state.etc,
-            "/target/ostree/deploy/default/deploy/checksum.0/etc"
-        );
-        assert_eq!(state.var, "/target/ostree/deploy/default/var");
-    }
-
-    #[test]
-    fn test_offline_ostree_status_uses_default_deployment() -> Result<()> {
-        let (target, commit) = private_ostree_sysroot()?;
-        let target_path = Utf8Path::from_path(target.path()).unwrap();
-        let sysroot = ostree::Sysroot::new(Some(&gio::File::for_path(target_path)));
-        sysroot.load(gio::Cancellable::NONE)?;
-        let deployment = sysroot.deployments().into_iter().next().unwrap();
-        assert_eq!(deployment.csum(), commit);
-        let deployment_dir = sysroot.deployment_dirpath(&deployment).to_string();
-
-        let host = offline_status(target_path)?;
-        assert!(host.status.booted.is_none());
-        let default = host.status.default_deployment.unwrap();
-        assert_eq!(default.backend, DeploymentBackend::Ostree);
-        assert_eq!(default.id, deployment_dir.rsplit('/').next().unwrap());
-        assert_eq!(
-            default.state_directories.etc,
-            format!("{target_path}/{deployment_dir}/etc")
-        );
-        assert_eq!(
-            default.state_directories.var,
-            format!("{target_path}/ostree/deploy/test/var")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_offline_rejects_ambiguous_backend_markers() -> Result<()> {
-        let (target, _) = private_ostree_sysroot()?;
-        let root = cap_std::fs::Dir::open_ambient_dir(target.path(), cap_std::ambient_authority())?;
-        root.create_dir_all("composefs")?;
-        root.create_dir_all(format!("state/deploy/{COMPOSEFS_ID}/etc"))?;
-        root.create_dir_all("state/os/default/var")?;
-        let error = offline_status(Utf8Path::from_path(target.path()).unwrap()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("both composefs and OSTree repository markers")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_offline_rejects_leftover_composefs_marker_on_ostree() -> Result<()> {
-        let (target, _) = private_ostree_sysroot()?;
-        std::fs::create_dir(target.path().join("composefs"))?;
-        let error = offline_status(Utf8Path::from_path(target.path()).unwrap()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("both composefs and OSTree repository markers")
-        );
-        Ok(())
-    }
 
     #[test]
     fn test_format_timestamp() {

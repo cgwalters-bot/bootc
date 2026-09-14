@@ -53,10 +53,6 @@ However, if the `incompatible` flag is set on a deployment, then there are layer
 
     Only display status for the booted deployment
 
-**--sysroot**=*SYSROOT*
-
-    Inspect an unbooted target sysroot. The path must be absolute; use --json or --format=yaml
-
 **-v**, **--verbose**
 
     Include additional fields in human readable format

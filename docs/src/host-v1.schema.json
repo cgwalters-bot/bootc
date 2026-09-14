@@ -232,44 +232,6 @@
         }
       ]
     },
-    "DefaultDeployment": {
-      "description": "The target-local default deployment selected for post-install injection.",
-      "type": "object",
-      "properties": {
-        "backend": {
-          "description": "Storage backend owning this deployment.",
-          "$ref": "#/$defs/DeploymentBackend"
-        },
-        "id": {
-          "description": "Backend-specific deployment identifier.",
-          "type": "string"
-        },
-        "stateDirectories": {
-          "description": "Writable state backing paths, without mounting the deployment.",
-          "$ref": "#/$defs/StateDirectories"
-        }
-      },
-      "required": [
-        "backend",
-        "id",
-        "stateDirectories"
-      ]
-    },
-    "DeploymentBackend": {
-      "description": "Storage backend for an unbooted deployment.",
-      "oneOf": [
-        {
-          "description": "OSTree deployment storage.",
-          "type": "string",
-          "const": "ostree"
-        },
-        {
-          "description": "Native composefs deployment storage.",
-          "type": "string",
-          "const": "composefs"
-        }
-      ]
-    },
     "FilesystemOverlay": {
       "description": "Details of an overlay filesystem: read-only or read/write, persistent or transient.",
       "type": "object",
@@ -349,17 +311,6 @@
           "anyOf": [
             {
               "$ref": "#/$defs/BootEntry"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "defaultDeployment": {
-          "description": "The default deployment on an unbooted target sysroot.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DefaultDeployment"
             },
             {
               "type": "null"
@@ -568,24 +519,6 @@
           ]
         }
       }
-    },
-    "StateDirectories": {
-      "description": "Writable state backing an unbooted deployment.",
-      "type": "object",
-      "properties": {
-        "etc": {
-          "description": "Backing directory for `/etc`.",
-          "type": "string"
-        },
-        "var": {
-          "description": "Backing directory for `/var`.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "etc",
-        "var"
-      ]
     },
     "Store": {
       "description": "The container storage backend",

@@ -286,10 +286,6 @@ pub(crate) struct StatusOpts {
     #[clap(long)]
     pub(crate) booted: bool,
 
-    /// Inspect an unbooted target sysroot. The path must be absolute; use --json or --format=yaml.
-    #[clap(long, value_parser = parse_absolute_path, conflicts_with = "booted")]
-    pub(crate) sysroot: Option<Utf8PathBuf>,
-
     /// Include additional fields in human readable format.
     #[clap(long, short = 'v')]
     pub(crate) verbose: bool,
@@ -307,6 +303,10 @@ pub(crate) struct UsrOverlayOpts {
 
 #[derive(Debug, clap::Subcommand, PartialEq, Eq)]
 pub(crate) enum InstallOpts {
+    /// Mount an installed deployment into a caller-owned directory.
+    Mount(crate::mount::MountOpts),
+    /// Unmount a deployment previously mounted by `install mount`.
+    Unmount(crate::mount::UnmountOpts),
     /// Install to the target block device.
     ///
     /// This command must be invoked inside of the container, which will be
@@ -728,7 +728,7 @@ pub(crate) enum SelinuxOpts {
     },
 }
 
-fn parse_absolute_path(value: &str) -> std::result::Result<Utf8PathBuf, String> {
+pub(crate) fn parse_absolute_path(value: &str) -> std::result::Result<Utf8PathBuf, String> {
     let path = Utf8PathBuf::from(value);
     if path.is_absolute() {
         Ok(path)
@@ -2288,6 +2288,8 @@ async fn run_from_opt(opt: Opt) -> Result<CliExitStatus> {
             }
         },
         Opt::Install(opts) => match opts {
+            InstallOpts::Mount(opts) => crate::mount::mount(opts).await,
+            InstallOpts::Unmount(opts) => crate::mount::unmount(opts).await,
             #[cfg(feature = "install-to-disk")]
             InstallOpts::ToDisk(opts) => crate::install::install_to_disk(opts).await,
             InstallOpts::ToFilesystem(opts) => {
@@ -2766,7 +2768,6 @@ mod tests {
                 format: None,
                 format_version: None,
                 booted: false,
-                sysroot: None,
                 verbose: false
             })
         ));
@@ -2789,19 +2790,6 @@ mod tests {
             Opt::parse_including_static(["bootc", "status", "-v"]),
             Opt::Status(StatusOpts { verbose: true, .. })
         ));
-
-        let opt =
-            Opt::try_parse_from(["bootc", "status", "--sysroot", "/target", "--json"]).unwrap();
-        assert!(matches!(
-            opt,
-            Opt::Status(StatusOpts { sysroot: Some(path), json: true, .. }) if path == "/target"
-        ));
-        for args in [
-            vec!["bootc", "status", "--sysroot", "target"],
-            vec!["bootc", "status", "--sysroot", "/target", "--booted"],
-        ] {
-            assert!(Opt::try_parse_from(args).is_err());
-        }
     }
 
     #[test]

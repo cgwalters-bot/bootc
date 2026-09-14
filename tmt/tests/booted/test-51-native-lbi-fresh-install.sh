@@ -20,6 +20,7 @@
 set -Eeuo pipefail
 
 target=/var/mnt/bootc-native-lbi-fresh
+mount_target=/mnt/installed
 mode=${LBI_FRESH_INSTALL_MODE:-stored}
 unified_storage=${LBI_FRESH_INSTALL_UNIFIED_STORAGE:-0}
 selinux_enforcing=${LBI_FRESH_INSTALL_SELINUX:-0}
@@ -59,10 +60,6 @@ if test "${TMT_REBOOT_COUNT:-0}" != 0; then
         fresh_install_lbi_assert_storage_labels /var/lib/containers/storage /usr/lib/bootc/storage
     fi
     expected=$(jq -r '.config_ids[]?' "$state_path")
-    offline_id=$(jq -er .offline_id "$state_path")
-    booted=$(/usr/bin/bootc status --json)
-    test "$(jq -r '.status.booted.composefs.verity' <<<"$booted")" = "$offline_id"
-    findmnt -n -o SOURCE / | grep -Fx "composefs:$offline_id"
     private_root=$(mktemp -d /var/tmp/lbi-target-root.XXXXXX)
     private_runroot=$(mktemp -d /var/tmp/lbi-target-runroot.XXXXXX)
     trap 'rm -rf "$private_root" "$private_runroot"' EXIT
@@ -91,10 +88,22 @@ if test "${TMT_REBOOT_COUNT:-0}" != 0; then
 fi
 
 mkdir -p "$target"
+if mountpoint -q "$target" || mountpoint -q "$mount_target"; then
+    printf 'fresh-install test path is already mounted\n' >&2
+    exit 1
+fi
 work=$(mktemp -d /var/tmp/bootc-native-lbi-fresh.XXXXXX)
+root_mounted=false
+deployment_mounted=false
 cleanup() {
     local rc=$?
-    umount -R "$target" 2>/dev/null || true
+    set +e
+    if test "$deployment_mounted" = true && mountpoint -q "$mount_target"; then
+        /usr/bin/bootc install unmount "$mount_target"
+    fi
+    if test "$root_mounted" = true && mountpoint -q "$target"; then
+        umount "$target"
+    fi
     if test "$rc" = 0; then
         rm -rf "$work"
     else
@@ -191,6 +200,7 @@ missing_stored_preflight() {
     root=$(lsblk --json --paths --output PATH,LABEL,TYPE /dev/vdb | jq -er \
         '[.. | objects | select(.type? == "part" and .label? == "root") | .path] | first')
     mount "$root" "$target"
+    root_mounted=true
     for path in "$target/state/deploy" "$target/boot/loader/entries"; do
         test ! -d "$path" || test -z "$(find "$path" -mindepth 1 -print -quit)"
     done
@@ -205,7 +215,8 @@ missing_stored_preflight() {
             fi
         done
     fi
-    umount -R "$target"
+    umount "$target"
+    root_mounted=false
     printf '%s\n' "native-lbi-fresh-install: stored-preflight=missing-local-lbi network=none"
 }
 
@@ -248,13 +259,18 @@ printf '%s\n' "native-lbi-fresh-install: mode=$mode network=$network unified-sto
 root=$(lsblk --json --paths --output PATH,LABEL,TYPE /dev/vdb | jq -er \
     '[.. | objects | select(.type? == "part" and .label? == "root") | .path] | first')
 mount "$root" "$target"
-phase=offline-target-status
-/usr/bin/bootc status --sysroot "$target" --json >"$work/status.json"
-jq -e '.status.booted == null and .status.defaultDeployment.backend == "composefs" and .status.defaultDeployment.id != null' "$work/status.json" >/dev/null
-var=$(jq -er '.status.defaultDeployment.stateDirectories.var' "$work/status.json")
-case "$var" in "$target"/*) ;; *) exit 1;; esac
-test -d "$var"
-offline_id=$(jq -er '.status.defaultDeployment.id' "$work/status.json")
+root_mounted=true
+phase=offline-target-mount
+mkdir -p "$mount_target"
+deployment_mounted=true
+/usr/bin/bootc install mount --sysroot "$target" --writable "$mount_target"
+mountpoint -q "$mount_target"
+test -d "$mount_target/var"
+var="$mount_target/var"
+deployments=("$target"/state/deploy/*)
+test "${#deployments[@]}" = 1
+deployment_id=$(basename "${deployments[0]}")
+test "${#deployment_id}" = 128
 target_store="$target/ostree/bootc/storage"
 test -d "$target_store"
 if test "$selinux_enforcing" = 1; then
@@ -285,9 +301,8 @@ else
     test -n "$target_ids"
 fi
 jq -n --arg mode "$mode" --argjson selinux_enforcing "$([ "$selinux_enforcing" = 1 ] && printf true || printf false)" --argjson images "$(jq -R . <"$work/images.list" | jq -s .)" \
-    --arg offline_id "$offline_id" \
     --argjson config_ids "$(printf '%s\n' "$target_ids" | jq -R 'select(length > 0)' | jq -s .)" \
-    '{mode: $mode, selinux_enforcing: $selinux_enforcing, offline_id: $offline_id, images: $images, config_ids: $config_ids}' >"$work/install.json"
+    '{mode: $mode, selinux_enforcing: $selinux_enforcing, images: $images, config_ids: $config_ids}' >"$work/install.json"
 install -D -m 0600 "$work/install.json" "$var/lib/bootc-test-lbi/install.json"
 printf '%s\n' "native-lbi-fresh-install: target-store=$target_store target-config-ids=${target_ids:-none}"
 fresh_install_preserve_tmt_state "$var"
@@ -295,7 +310,11 @@ if test -f /root/.ssh/authorized_keys; then
     install -D -m 0600 /root/.ssh/authorized_keys "$var/roothome/.ssh/authorized_keys"
 fi
 sync
-umount -R "$target"
+phase=offline-target-unmount
+/usr/bin/bootc install unmount "$mount_target"
+deployment_mounted=false
+umount "$target"
+root_mounted=false
 phase=request-fresh-disk-boot
 printf '%s\n' "native-lbi-fresh-install: requesting fresh-disk boot mode=$mode"
 tmt-reboot

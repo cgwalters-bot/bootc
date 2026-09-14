@@ -63,15 +63,14 @@ Fresh-install plans must be given the exact local libvirt socket explicitly;
 the command must not fall back to another libvirt daemon:
 
 ```console
-cargo xtask run-tmt --libvirt-connect 'qemu+unix:///session?socket=/run/user/<uid>/libvirt/virtqemud-sock' <image> status-fresh-install
+cargo xtask run-tmt --libvirt-connect 'qemu+unix:///session?socket=/run/user/<uid>/libvirt/virtqemud-sock' <image> native-lbi-fresh-install
 ```
 
 Replace `<uid>` with the runtime owner’s UID and use the socket belonging to
 that user’s libvirt session.
 
-The status API fresh-install test passes `--bound-images=skip` for both
-backends. It does not claim native composefs logically bound-image support;
-that remains separately covered by the logical-bound-install test (plan 22).
+Fresh-install coverage is backend-specific; native composefs logically bound
+images remain separately covered by the logical-bound-install tests.
 
 ## Governance
 See [GOVERNANCE.md](GOVERNANCE.md) for project governance details.

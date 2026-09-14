@@ -165,22 +165,31 @@ a `bootc` kickstart command that drives `to-filesystem` this way.
 #### Postprocessing after to-filesystem
 
 Some installation tools may want to inject additional data, such as adding an
-`/etc/hostname` into the target root. Use bootc's backend-neutral, read-only
-status API to find the writable backing directories:
+`/etc/hostname` into the target root. Mount the offline deployment explicitly
+in the caller's mount namespace:
 
 ```bash
-bootc status --sysroot /path/to/target --json
+mkdir /mnt/installed
+bootc install mount --sysroot /path/to/target --writable /mnt/installed
+# mutate /mnt/installed/etc and /mnt/installed/var as needed
+bootc install unmount /mnt/installed
 ```
 
-The returned `status.defaultDeployment.stateDirectories.etc` and `.var` are
-the paths to modify. This works for both OSTree and composefs targets without
-mounting or chrooting the deployment; `status.defaultDeployment.backend`
-identifies the selected backend. The target is unbooted, so `status.booted`
-remains `null`.
+Mounts are read-only by default. `--writable` enables only the persistent
+`/etc` and `/var` mounts; the deployment root and `/usr` remain read-only.
+The caller owns the mount namespace and must exclusively own the target until
+the mount is removed and finalization is complete.
 
 However, for tools that do perform any changes, there is a new
 `bootc install finalize` command which is optional, but recommended
 to run as the penultimate step before unmounting the target filesystem.
+
+The mount record is written after assembly. A crash before that write can leave
+mounts without a record; assembly is not transactionally crash-safe. Do not use
+generic unmount or cleanup commands, because the namespace may contain shared
+mounts. Inspect the mount table manually and use ordinary `umount` only for
+mounts whose source, mount ID, target, and read-only attributes have been
+verified.
 
 This command will perform some basic sanity checks and may also
 perform fixups on the target root. For example, a direction
@@ -253,16 +262,15 @@ previous installation.
 
 After running `bootc install to-existing-root`, you may want to inject
 configuration files (such as `/etc/fstab`, systemd units, or other
-configuration) into the newly installed system before rebooting. Discover the
-target's writable `/etc` backing path first:
+configuration) into the newly installed system before rebooting. Mount the
+target explicitly and mutate it through the mounted view:
 
 ```bash
-# Get the deployment's writable /etc path
-DEPLOY_PATH=$(bootc status --sysroot /target --json | jq -r \
-  '.status.defaultDeployment.stateDirectories.etc')
+mkdir /mnt/installed
+bootc install mount --sysroot /target --writable /mnt/installed
 
 # Add a systemd mount unit
-cat > ${DEPLOY_PATH}/systemd/system/data.mount <<EOF
+cat > /mnt/installed/etc/systemd/system/data.mount <<EOF
 [Unit]
 Description=Data partition
 
@@ -275,6 +283,8 @@ Type=xfs
 WantedBy=local-fs.target
 EOF
 ```
+
+bootc install unmount /mnt/installed
 
 ###### Injecting kernel arguments for local state
 
@@ -459,9 +469,9 @@ for legacy `/etc/fstab` references for `/` to use
 
 Per the [filesystem](filesystem.md) section, `/etc` and `/var` are
 machine-local state by default. To inject additional content after installation,
-query `bootc status --sysroot /path/to/target --json` and use
-`status.defaultDeployment.stateDirectories.etc` or `.var`. This is the
-backend-neutral API for installation software such as
+use `bootc install mount --sysroot /path/to/target --writable /mnt/installed`
+and mutate `/mnt/installed/etc` or `/mnt/installed/var`. This is the
+backend-neutral interface for installation software such as
 [Anaconda](https://github.com/rhinstaller/anaconda) to implement `%post`
 scripts before first boot.
 

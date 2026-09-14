@@ -207,15 +207,6 @@ check:
     enabled: true
   test: nu booted/test-49-composefs-1-16-bridge.nu
 
-/test-50-status-fresh-install:
-  summary: Verify offline status paths survive a fresh installed boot
-  duration: 45m
-  adjust:
-  - when: status_fresh_install != true
-    enabled: false
-    because: this retains a VM and disk for runtime coordinator approval
-  test: bash booted/test-50-status-fresh-install.sh
-
 /test-51-native-lbi-fresh-install:
   summary: Verify native fresh install logical bound image modes
   duration: 45m

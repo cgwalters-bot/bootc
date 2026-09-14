@@ -331,18 +331,6 @@ execute:
   extra-try_bind_storage: true
   extra-skip_if_ostree: true
 
-/plan-50-status-fresh-install:
-  summary: Verify offline status paths survive a fresh installed boot
-  discover:
-    how: fmf
-    test:
-      - /tmt/tests/tests/test-50-status-fresh-install
-  adjust:
-  - when: status_fresh_install != true
-    enabled: false
-    because: this retains a VM and disk for runtime coordinator approval
-  extra-fresh_install_disk: true
-
 /plan-51-native-lbi-fresh-install:
   summary: Verify native fresh install logical bound image modes
   discover:
