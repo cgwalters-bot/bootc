@@ -189,7 +189,11 @@ use serde::{Deserialize, Serialize};
 use self::baseline::InstallBlockDeviceOpts;
 use crate::bootc_composefs::status::ComposefsCmdline;
 use crate::bootc_composefs::{
-    boot::setup_composefs_boot, repo::initialize_composefs_repository,
+    boot::setup_composefs_boot,
+    repo::{
+        finalize_fresh_repository_policy, initialize_composefs_repository, tag_pulled_image,
+        validate_repository_policy,
+    },
     status::get_container_manifest_and_config,
 };
 use crate::bootc_kargs::{INITRD_ARG_PREFIX, ROOTFLAGS_KEY};
@@ -2057,108 +2061,54 @@ async fn install_to_filesystem_impl(
     }
 
     if state.composefs_options.composefs_backend {
-        let source_ref = state.source.imageref.clone();
         let fetch_ref = state.source.composefs_fetch_reference();
-        let source_manifest = if state.source.in_host_mountns {
-            Some(get_container_manifest_and_config(&fetch_ref).await?)
-        } else {
-            std::fs::create_dir_all(rootfs.physical_root_path.join("var/tmp"))
-                .context("Creating target-backed image staging area")?;
-            let manifest = get_container_manifest_and_config(&fetch_ref).await?;
-            crate::deploy::check_disk_space_for_composefs_staging(
-                rootfs.physical_root_path.join("var/tmp").as_std_path(),
-                &manifest.manifest,
-                &crate::spec::ImageReference {
-                    image: source_ref.name.clone(),
-                    transport: source_ref.transport.to_string(),
-                    signature: None,
-                },
-            )?;
-            Some(manifest)
-        };
-        let staged_source = if state.source.in_host_mountns {
-            None
-        } else {
-            let source = state.source.imageref.clone();
-            let source: ostree_ext::container::ImageReference = source;
-            Some(
-                crate::bootc_composefs::repo::stage_external_source(
-                    &source,
-                    rootfs.physical_root_path.as_std_path(),
-                    state.source.digest.as_deref(),
-                )
-                .await?,
-            )
-        };
-        let staged_policy = if let Some(staged) = staged_source.as_ref() {
-            crate::bootc_composefs::repo::inspect_staged_uki_policy(
-                &staged.imgref,
-                staged.dir.path(),
-            )
-            .await?
-        } else {
-            None
-        };
-        let allow_missing_verity = crate::bootc_composefs::repo::resolve_initial_uki_policy(
-            state.composefs_fsverity_supported,
-            state.composefs_options.allow_missing_verity,
-            staged_policy,
-        )?;
-        // Pre-flight disk space check for native composefs install path.
-        {
-            let img_manifest_config = match source_manifest {
-                Some(manifest) => manifest,
-                None => get_container_manifest_and_config(&fetch_ref).await?,
-            };
-            crate::store::ensure_composefs_dir(&rootfs.physical_root)?;
-            // Use init_path since the repo may not exist yet during install.
-            // Generate both V1 and V2 EROFS images (see initialize_composefs_repository);
-            // this config must match the one used there since it re-inits the same repo.
-            let allow_missing_fsverity = allow_missing_verity;
-            let config =
-                crate::bootc_composefs::repo::composefs_repository_config(allow_missing_fsverity);
-            let (cfs_repo, _created) = crate::store::ComposefsRepository::init_path(
-                &rootfs.physical_root,
-                crate::store::COMPOSEFS,
-                config,
-            )?;
-            if !cfs_repo.is_insecure()
-                && staged_policy == Some(true)
-                && !state.allow_missing_verity_explicit
-            {
-                anyhow::bail!(
-                    "Initial insecure UKI conflicts with the existing strict composefs repository; explicitly pass --allow-missing-verity to permit this session"
-                );
-            }
-            crate::bootc_composefs::repo::validate_repository_policy(
-                &cfs_repo,
-                allow_missing_fsverity,
-            )?;
-            crate::deploy::check_disk_space_composefs(
-                &cfs_repo,
-                &img_manifest_config.manifest,
-                &crate::spec::ImageReference {
-                    image: state.source.imageref.name.clone(),
-                    transport: state.source.imageref.transport.to_string(),
-                    signature: None,
-                },
-            )?;
-        }
-        let fetch_imgref = if let Some(staged) = staged_source.as_ref() {
-            Some(staged.imgref.clone())
-        } else {
-            Some(fetch_ref.clone().into())
-        };
-        let pull_result = initialize_composefs_repository(
+        let manifest = get_container_manifest_and_config(&fetch_ref).await?;
+        // A capable filesystem gets a strict provisional repository.  The
+        // imported image is inspected below; only a fresh repository may then
+        // atomically adopt the image's explicit relaxed policy.
+        let provisional_relaxed = !state.composefs_fsverity_supported;
+        let fetch_imgref = Some(fetch_ref.clone().into());
+        let initialized = initialize_composefs_repository(
             state,
             rootfs,
-            allow_missing_verity,
+            provisional_relaxed,
             state.target_opts.unified_storage_exp,
             fetch_imgref.as_ref(),
+            &manifest.manifest,
         )
         .await?;
 
-        setup_composefs_boot(rootfs, state, &pull_result, allow_missing_verity).await?;
+        let requested_relaxed = crate::bootc_composefs::repo::final_repository_policy(
+            initialized.uki_policy,
+            state.composefs_options.allow_missing_verity,
+        );
+        if !initialized.created {
+            validate_repository_policy(
+                initialized.repository_insecure,
+                requested_relaxed,
+                state.allow_missing_verity_explicit,
+            )?;
+        } else if !requested_relaxed && provisional_relaxed {
+            anyhow::bail!(
+                "Initial UKI requires fs-verity, but the target filesystem does not support it"
+            );
+        }
+        if initialized.created && requested_relaxed && !provisional_relaxed {
+            finalize_fresh_repository_policy(
+                rootfs.physical_root_path.as_std_path(),
+                crate::bootc_composefs::repo::composefs_repository_config(false),
+            )?;
+        }
+        let allow_missing_verity = requested_relaxed;
+        tag_pulled_image(&rootfs.physical_root, &initialized.pull_result)?;
+
+        setup_composefs_boot(
+            rootfs,
+            state,
+            &initialized.pull_result,
+            allow_missing_verity,
+        )
+        .await?;
 
         // Label composefs objects as /usr so they get usr_t rather than
         // default_t (which has no policy match).
