@@ -70,7 +70,7 @@ generic_buildargs := ""
 jobs := env("BOOTC_jobs", "")
 memory := env("BOOTC_memory", "")
 memory_swap := env("BOOTC_memory_swap", "")
-_resource_buildargs := if jobs != "" { " --build-arg=CARGO_BUILD_JOBS=" + jobs } else { "" }
+_resource_buildargs := " --build-arg=CARGO_BUILD_JOBS=" + (if jobs != "" { jobs } else { `nproc` })
 _resource_podman_args := (if memory != "" { " --memory=" + memory } else { "" }) \
                          + (if memory_swap != "" { " --memory-swap=" + memory_swap } else { "" })
 _extra_src_args := if extra_src != "" { "-v " + extra_src + ":/run/extra-src:ro --security-opt=label=disable" } else { "" }

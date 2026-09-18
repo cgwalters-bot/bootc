@@ -5,7 +5,7 @@ set -xeuo pipefail
 # Version can be passed via RPM_VERSION env var (set by Dockerfile ARG)
 # or defaults to the hardcoded value in the spec file
 VERSION="${RPM_VERSION:-}"
-CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-}"
+CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 
 # Determine output directory (defaults to /out)
 OUTPUT_DIR="${1:-/out}"
