@@ -8,14 +8,15 @@ use ocidir::cap_std::ambient_authority;
 use rustix::fs::{AtFlags, RenameFlags, fsync, renameat_with};
 
 use crate::bootc_composefs::boot::{
-    BootType, FILENAME_PRIORITY_PRIMARY, FILENAME_PRIORITY_SECONDARY, primary_sort_key,
-    secondary_sort_key, type1_entry_conf_file_name,
+    BootType, FILENAME_PRIORITY_PRIMARY, FILENAME_PRIORITY_SECONDARY, os_id_from_sort_key,
+    parse_os_release, primary_sort_key, secondary_sort_key, type1_entry_conf_file_name,
 };
 use crate::bootc_composefs::status::{get_composefs_status, get_sorted_type1_boot_entries};
 use crate::composefs_consts::{
     COMPOSEFS_STAGED_DEPLOYMENT_FNAME, COMPOSEFS_TRANSIENT_STATE_DIR, TYPE1_ENT_PATH_STAGED,
 };
 use crate::deploy::ROLLBACK_JOURNAL_ID;
+use crate::parsers::bls_config::BLSConfig;
 use crate::spec::{Bootloader, BootloaderKind, Host};
 use crate::store::{BootedComposefs, Storage};
 use crate::{
@@ -114,6 +115,37 @@ fn rollback_grub_uki_entries(boot_dir: &Dir) -> Result<()> {
     rename_exchange_user_cfg(&entries_dir)
 }
 
+/// Determine the os_id to use for the rewritten Type1 boot entries.
+///
+/// At deploy time both entries are written using the os_id of the new
+/// deployment (from its os-release or UKI `.osrel`), and that os_id is
+/// persisted in the sort-key. Recover it from there instead of re-reading the
+/// deployment images, preferring the entry that becomes primary to mirror
+/// deploy.
+///
+/// Entries written by older bootc versions don't carry the os_id in their
+/// sort-key; for those fall back to the booted root's os-release, and finally
+/// to "bootc", matching what deploy does when there is no os-release.
+fn rollback_os_id(new_primary: &BLSConfig, new_secondary: &BLSConfig) -> Result<String> {
+    if let Some(os_id) = os_id_from_sort_keys([new_primary, new_secondary]) {
+        return Ok(os_id.to_owned());
+    }
+
+    let root = Dir::open_ambient_dir("/", ambient_authority()).context("Opening root")?;
+    let os_id = parse_os_release(&root)?
+        .map(|(id, ..)| id)
+        .unwrap_or_else(|| "bootc".to_owned());
+    tracing::debug!("No os_id in boot entry sort-keys, using {os_id} from os-release");
+    Ok(os_id)
+}
+
+/// Returns the os_id from the first entry whose sort-key contains one.
+fn os_id_from_sort_keys<'a>(entries: impl IntoIterator<Item = &'a BLSConfig>) -> Option<&'a str> {
+    entries
+        .into_iter()
+        .find_map(|cfg| os_id_from_sort_key(cfg.sort_key.as_deref()?))
+}
+
 /// Performs rollback for
 /// - Grub Type1 boot entries
 /// - Systemd Typ1 boot entries
@@ -136,9 +168,7 @@ fn rollback_composefs_entries(host: &Host, boot_dir: &Dir, bootloader: Bootloade
     assert!(all_configs.len() == 2);
 
     // For rollback: previous gets primary sort-key, booted gets secondary sort-key
-    // Use "bootc" as default os_id for rollback scenarios
-    // TODO: Extract actual os_id from deployment
-    let os_id = "bootc";
+    let os_id = &rollback_os_id(&all_configs[0], &all_configs[1])?;
 
     // This is the currently booted deployment - it should become secondary
     // OR if rollback was queued, it would become primary
@@ -275,4 +305,43 @@ pub(crate) async fn composefs_rollback(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_os_id_from_sort_keys() {
+        let cfg = |sort_key: Option<&str>| {
+            let mut cfg = BLSConfig::default();
+            cfg.sort_key = sort_key.map(ToOwned::to_owned);
+            cfg
+        };
+
+        let cases: &[(&[Option<&str>], Option<&str>)] = &[
+            (&[Some("bootc-rhel-0"), Some("bootc-rhel-1")], Some("rhel")),
+            // The first entry wins
+            (
+                &[Some("bootc-rhel-1"), Some("bootc-fedora-0")],
+                Some("rhel"),
+            ),
+            (&[Some("bootc-fedora-coreos-1")], Some("fedora-coreos")),
+            // Legacy or missing sort-keys are skipped
+            (&[Some("0"), Some("bootc-rhel-1")], Some("rhel")),
+            (&[None, Some("bootc-rhel-0")], Some("rhel")),
+            (&[Some("0"), Some("1")], None),
+            (&[None, None], None),
+            (&[], None),
+        ];
+
+        for (sort_keys, expected) in cases {
+            let configs: Vec<_> = sort_keys.iter().copied().map(cfg).collect();
+            assert_eq!(
+                os_id_from_sort_keys(&configs),
+                *expected,
+                "sort keys: {sort_keys:?}"
+            );
+        }
+    }
 }
