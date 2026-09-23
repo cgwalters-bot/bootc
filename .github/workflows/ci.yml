@@ -557,7 +557,7 @@ jobs:
 
   # Test bootc install on Fedora CoreOS (separate job to avoid disk space issues
   # when run in the same job as test-integration).
-  # Uses fedora-43 as it's the current stable Fedora release matching CoreOS.
+  # Uses fedora-44 as it's the current stable Fedora release matching CoreOS.
   test-coreos:
     # https://github.com/ostreedev/ostree/pull/3571 broke this because /boot
     # without a separate /boot partition isn't mounted in the initramfs anymore.
@@ -577,14 +577,14 @@ jobs:
 
       - name: Setup env
         run: |
-          BASE=$(just pullspec-for-os base fedora-43)
+          BASE=$(just pullspec-for-os base fedora-44)
           echo "BOOTC_base=${BASE}" >> $GITHUB_ENV
           echo "BOOTC_variant=ostree" >> $GITHUB_ENV
 
       - name: Download package artifacts
         uses: actions/download-artifact@v8
         with:
-          name: packages-fedora-43
+          name: packages-fedora-44
           path: target/packages/
 
       - name: Build container and test on CoreOS
@@ -598,7 +598,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: tmt-log-fedora-43-coreos-${{ env.ARCH }}
+          name: tmt-log-fedora-44-coreos-${{ env.ARCH }}
           path: /var/tmp/tmt
 
   # Test the container export -> Anaconda liveimg install path.
