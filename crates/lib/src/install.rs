@@ -1724,11 +1724,10 @@ async fn prepare_install(
         composefs_options.composefs_backend = true;
     }
 
-    if composefs_options.composefs_backend
-        && matches!(config_opts.bootloader, Some(Bootloader::None))
-    {
-        anyhow::bail!("Bootloader set to none is not supported with the composefs backend");
-    }
+    ensure!(
+        config_opts.bootloader != Some(Bootloader::Ukiboot) || composefs_options.composefs_backend,
+        "ukiboot requires --composefs-backend"
+    );
 
     // We need to access devices that are set up by the host udev
     bootc_mount::ensure_mirrored_host_mount("/dev")?;
@@ -1878,25 +1877,35 @@ async fn prepare_install(
 }
 
 impl PostFetchState {
-    pub(crate) fn new(state: &State, d: &Dir) -> Result<Self> {
+    pub(crate) fn new(
+        state: &State,
+        d: &Dir,
+        image_bootloader: Option<Bootloader>,
+    ) -> Result<Self> {
         // Determine bootloader type for the target system
-        // Priority: user-specified > bootupd availability > systemd-boot fallback
-        let detected_bootloader = {
-            if let Some(bootloader) = state.config_opts.bootloader.clone() {
-                bootloader
-            } else {
-                if crate::bootloader::supports_bootupd(d)? {
-                    crate::spec::Bootloader::Grub
-                } else {
-                    crate::spec::Bootloader::Systemd
-                }
-            }
-        };
+        // Priority: user-specified > image-required > bootupd availability > systemd-boot fallback
+        let detected_bootloader =
+            select_bootloader(state.config_opts.bootloader, image_bootloader, d)?;
         println!("Bootloader: {detected_bootloader}");
         let r = Self {
             detected_bootloader,
         };
         Ok(r)
+    }
+}
+
+fn select_bootloader(
+    configured: Option<Bootloader>,
+    image: Option<Bootloader>,
+    root: &Dir,
+) -> Result<Bootloader> {
+    if let Some(bootloader) = configured.or(image) {
+        return Ok(bootloader);
+    }
+    if crate::bootloader::supports_bootupd(root)? {
+        Ok(Bootloader::Grub)
+    } else {
+        Ok(Bootloader::Systemd)
     }
 }
 
@@ -1927,7 +1936,7 @@ async fn install_with_sysroot(
         .physical_root
         .open_dir(&deployment_path)
         .context("Opening deployment dir")?;
-    let postfetch = PostFetchState::new(state, &deployment_dir)?;
+    let postfetch = PostFetchState::new(state, &deployment_dir, None)?;
 
     if cfg!(target_arch = "s390x") {
         // TODO: Integrate s390x support into install_via_bootupd
@@ -1950,7 +1959,7 @@ async fn install_with_sysroot(
                     Some(bind_boot_path.as_path()),
                 )?;
             }
-            Bootloader::Systemd | Bootloader::GrubCC => {
+            Bootloader::Systemd | Bootloader::GrubCC | Bootloader::Ukiboot => {
                 anyhow::bail!("bootupd is required for ostree-based installs");
             }
             Bootloader::None => {
@@ -2115,11 +2124,13 @@ async fn install_to_filesystem_impl(
             fetch_imgref.as_ref(),
         )
         .await?;
-        let uki_policy =
-            crate::bootc_composefs::repo::inspect_uki_policy(&initialized.repo, &pull_result)?;
+        let artifact_policy = crate::bootc_composefs::repo::inspect_boot_artifact_policy(
+            &initialized.repo,
+            &pull_result,
+        )?;
 
         let requested_relaxed = crate::bootc_composefs::repo::final_repository_policy(
-            uki_policy,
+            artifact_policy,
             state.composefs_options.allow_missing_verity,
         );
         if !initialized.created {
@@ -2130,7 +2141,7 @@ async fn install_to_filesystem_impl(
             )?;
         } else if !requested_relaxed && provisional_relaxed {
             anyhow::bail!(
-                "Initial UKI requires fs-verity, but the target filesystem does not support it"
+                "Initial boot artifact requires fs-verity, but the target filesystem does not support it"
             );
         }
         // Repository handles retain LOCK_SH, so no Arc may remain before the
@@ -3047,6 +3058,25 @@ pub(crate) async fn install_finalize(target: &Utf8Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_select_bootloader() -> Result<()> {
+        let root = cap_std_ext::cap_tempfile::tempdir(cap_std::ambient_authority())?;
+        assert_eq!(select_bootloader(None, None, &root)?, Bootloader::Systemd);
+        assert_eq!(
+            select_bootloader(None, Some(Bootloader::None), &root)?,
+            Bootloader::None
+        );
+        assert_eq!(
+            select_bootloader(None, Some(Bootloader::Ukiboot), &root)?,
+            Bootloader::Ukiboot
+        );
+        assert_eq!(
+            select_bootloader(Some(Bootloader::Grub), Some(Bootloader::None), &root)?,
+            Bootloader::Grub
+        );
+        Ok(())
+    }
 
     #[test]
     fn install_opts_serializable() {
