@@ -27,7 +27,10 @@ For the composefs backend, the UKI must be located at `/boot/EFI/Linux/$kver.efi
 
 ### /ostree symlink and `bootc container lint`
 
-This is [a bug](https://github.com/bootc-dev/bootc/issues/2256): currently a `/ostree -> /sysroot/ostree` symlink is required just for `bootc container lint` to pass, even though it's not required for `/sysroot/ostree` to exist.
+`bootc container lint` requires a `/ostree -> sysroot/ostree` symlink,
+unless the image is composefs-native, which is signaled by the presence of
+`/usr/lib/composefs/setup-root-conf.toml` (it may be empty); see
+[bootc-setup-root-conf.toml(5)](man/bootc-setup-root-conf.5.md).
 
 ## composefs backend
 

@@ -592,6 +592,20 @@ fn check_composefs(dir: &Dir, _config: &LintExecutionConfig) -> LintResult {
     lint_ok()
 }
 
+/// The setup-root configuration, relative to the root directory.
+fn setup_root_conf_path() -> &'static str {
+    bootc_initramfs_setup::SETUP_ROOT_CONF_PATH.trim_start_matches('/')
+}
+
+/// Whether the image is intended to be deployed only with the composefs
+/// backend, which is signaled by the presence of a setup-root configuration
+/// file (even if empty).
+fn is_composefs_native(root: &Dir) -> Result<bool> {
+    Ok(root
+        .symlink_metadata_optional(setup_root_conf_path())?
+        .is_some())
+}
+
 /// Check for a few files and directories we expect in the base image.
 fn check_baseimage_root_norecurse(dir: &Dir, _config: &LintExecutionConfig) -> LintResult {
     // Check /sysroot
@@ -604,6 +618,10 @@ fn check_baseimage_root_norecurse(dir: &Dir, _config: &LintExecutionConfig) -> L
 
     // Check /ostree -> sysroot/ostree
     let Some(meta) = dir.symlink_metadata_optional("ostree")? else {
+        // Composefs-native images don't use ostree, so they don't need it.
+        if is_composefs_native(dir)? {
+            return lint_ok();
+        }
         return lint_err("Missing ostree -> sysroot/ostree link");
     };
     if !meta.is_symlink() {
@@ -624,7 +642,9 @@ static LINT_BASEIMAGE_ROOT: Lint = Lint::new_fatal(
     "baseimage-root",
     indoc! { r#"
 Check that expected files are present in the root of the filesystem; such
-as /sysroot and a composefs configuration for ostree. More in
+as /sysroot and a composefs configuration for ostree. The /ostree symlink
+is not required for composefs-native images, i.e. those that ship
+/usr/lib/composefs/setup-root-conf.toml. More in
 <https://bootc.dev/bootc/bootc-images.html#standard-image-content>.
 "#},
     check_baseimage_root,
@@ -1365,6 +1385,21 @@ mod tests {
         drop(td);
         let td = passing_fixture()?;
         check_baseimage_root(&td, config).unwrap().unwrap();
+
+        // Composefs-native images don't need /ostree...
+        td.remove_file("ostree")?;
+        assert!(check_baseimage_root(&td, config).unwrap().is_err());
+        let conf = Utf8Path::new(setup_root_conf_path());
+        td.create_dir_all(conf.parent().unwrap())?;
+        td.write(conf, "")?;
+        check_baseimage_root(&td, config).unwrap().unwrap();
+        // ...but if they have it, it must still be correct
+        td.create_dir("ostree")?;
+        assert!(check_baseimage_root(&td, config).unwrap().is_err());
+        td.remove_dir("ostree")?;
+        // ...and they still need /sysroot
+        td.remove_dir("sysroot")?;
+        assert!(check_baseimage_root(&td, config).unwrap().is_err());
         Ok(())
     }
 
