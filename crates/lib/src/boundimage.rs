@@ -196,7 +196,7 @@ pub(crate) async fn pull_images_impl(
         .await?;
     }
 
-    println!("Bound images stored: {n}");
+    cli_status!("Bound images stored: {n}");
 
     Ok(())
 }

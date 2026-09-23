@@ -1232,7 +1232,7 @@ fn handle_staged_soft_reboot(
 /// Perform a soft reboot for a staged deployment
 #[context("Soft reboot staged deployment")]
 fn soft_reboot_staged(sysroot: &SysrootLock) -> Result<()> {
-    println!("Staged deployment is soft-reboot capable, preparing for soft-reboot...");
+    cli_status!("Staged deployment is soft-reboot capable, preparing for soft-reboot...");
 
     let deployments_list = sysroot.deployments();
     let staged_deployment = deployments_list
@@ -1247,7 +1247,7 @@ fn soft_reboot_staged(sysroot: &SysrootLock) -> Result<()> {
 /// Perform a soft reboot for a rollback deployment
 #[context("Soft reboot rollback deployment")]
 fn soft_reboot_rollback(booted_ostree: &BootedOstree<'_>) -> Result<()> {
-    println!("Rollback deployment is soft-reboot capable, preparing for soft-reboot...");
+    cli_status!("Rollback deployment is soft-reboot capable, preparing for soft-reboot...");
 
     let deployments_list = booted_ostree.sysroot.deployments();
     let target_deployment = deployments_list
@@ -1304,9 +1304,9 @@ async fn apply_from_downloaded_ostree(
     if staged_deployment.is_finalization_locked() {
         crate::boundimage::pull_bound_images(storage, &staged_deployment).await?;
         ostree.change_finalization(&staged_deployment)?;
-        println!("Staged deployment will now be applied on reboot");
+        cli_status!("Staged deployment will now be applied on reboot");
     } else {
-        println!("Staged deployment is already set to apply on reboot");
+        cli_status!("Staged deployment is already set to apply on reboot");
     }
 
     handle_staged_soft_reboot(booted_ostree, opts.soft_reboot, &host)?;
@@ -1395,15 +1395,15 @@ async fn upgrade(
                 .await?;
         match imp.prepare().await? {
             PrepareResult::AlreadyPresent(_) => {
-                println!("No changes in: {ostree_imgref:#}");
+                cli_status!("No changes in: {ostree_imgref:#}");
             }
             PrepareResult::Ready(r) => {
                 crate::deploy::check_bootc_label(&r.config);
-                println!("Update available for: {ostree_imgref:#}");
+                cli_status!("Update available for: {ostree_imgref:#}");
                 if let Some(version) = r.version() {
-                    println!("  Version: {version}");
+                    cli_status!("  Version: {version}");
                 }
-                println!("  Digest: {}", r.manifest_digest);
+                cli_status!("  Digest: {}", r.manifest_digest);
                 changed = true;
                 if let Some(previous_image) = booted_image.as_ref() {
                     let diff =
@@ -1457,7 +1457,7 @@ async fn upgrade(
                     // --download-only: set download-only mode
                     if !staged.is_finalization_locked() {
                         storage.get_ostree()?.change_finalization(&staged)?;
-                        println!("Image downloaded, but will not be applied on reboot");
+                        cli_status!("Image downloaded, but will not be applied on reboot");
                         download_only_changed = true;
                     }
                 } else if !opts.check {
@@ -1465,7 +1465,7 @@ async fn upgrade(
                     // (skip if --check, which is read-only)
                     if staged.is_finalization_locked() {
                         storage.get_ostree()?.change_finalization(&staged)?;
-                        println!("Staged deployment will now be applied on reboot");
+                        cli_status!("Staged deployment will now be applied on reboot");
                         download_only_changed = true;
                     }
                 }
@@ -1474,7 +1474,7 @@ async fn upgrade(
             }
 
             if !download_only_changed {
-                println!("Staged update present, not changed");
+                cli_status!("Staged update present, not changed");
             }
 
             handle_staged_soft_reboot(booted_ostree, opts.soft_reboot, &host)?;
@@ -1482,7 +1482,7 @@ async fn upgrade(
                 crate::reboot::reboot()?;
             }
         } else if booted_unchanged {
-            println!("No update available.")
+            cli_status!("No update available.")
         } else {
             let stateroot = booted_ostree.stateroot();
             let from = MergeState::from_stateroot(storage, &stateroot)?;
@@ -1578,7 +1578,7 @@ async fn switch_ostree(
     };
 
     if new_spec == host.spec {
-        println!("Image specification is unchanged.");
+        cli_status!("Image specification is unchanged.");
         if opts.apply && host.status.staged.is_some() {
             crate::reboot::reboot()?;
         }
@@ -1700,7 +1700,7 @@ async fn switch(opts: SwitchOpts) -> Result<()> {
             })
             .await??
         };
-        println!("Updated {deployid} to pull from {target}");
+        cli_status!("Updated {deployid} to pull from {target}");
         return Ok(());
     }
     let storage = &get_storage().await?;
@@ -1772,7 +1772,7 @@ async fn edit_ostree(
     };
 
     if new_host.spec == host.spec {
-        println!("Edit cancelled, no changes made.");
+        cli_status!("Edit cancelled, no changes made.");
         return Ok(());
     }
     host.spec.verify_transition(&new_host.spec)?;

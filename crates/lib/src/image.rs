@@ -250,10 +250,10 @@ pub(crate) async fn push_entrypoint(
 
     let mut opts = ostree_ext::container::store::ExportToOCIOpts::default();
     opts.progress_to_stdout = true;
-    println!("Copying local image {source} to {target} ...");
+    cli_status!("Copying local image {source} to {target} ...");
     let r = ostree_ext::container::store::export(repo, &source, &target, Some(opts)).await?;
 
-    println!("Pushed: {target} {r}");
+    cli_status!("Pushed: {target} {r}");
     Ok(())
 }
 
@@ -323,7 +323,7 @@ async fn set_unified_composefs(
     // Check if the image is already in bootc storage
     let img_transport = imgref.to_transport_image()?;
     if imgstore.exists(&img_transport).await? {
-        println!("Image {} is already in bootc storage.", imgref.image);
+        cli_status!("Image {} is already in bootc storage.", imgref.image);
         tracing::info!(
             message_id = SET_UNIFIED_CFS_JOURNAL_ID,
             bootc.status = "already_unified",
@@ -373,7 +373,7 @@ async fn set_unified_composefs(
         bootc.status = "set_unified_complete",
         "Unified storage set. Future upgrade/switch will use zero-copy path automatically.",
     );
-    println!("Unified storage enabled for {}.", imgref.image);
+    cli_status!("Unified storage enabled for {}.", imgref.image);
     Ok(())
 }
 

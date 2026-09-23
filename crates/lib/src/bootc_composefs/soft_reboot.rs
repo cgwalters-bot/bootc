@@ -40,7 +40,7 @@ pub(crate) fn reset_soft_reboot() -> Result<()> {
 
     let Some(nextroot) = nextroot else {
         tracing::debug!("Nextroot does not exist");
-        println!("No deployment staged for soft rebooting");
+        cli_status!("No deployment staged for soft rebooting");
         return Ok(());
     };
 
@@ -50,13 +50,13 @@ pub(crate) fn reset_soft_reboot() -> Result<()> {
 
     if !nextroot_mounted {
         tracing::debug!("Nextroot is not a mountpoint");
-        println!("No deployment staged for soft rebooting");
+        cli_status!("No deployment staged for soft rebooting");
         return Ok(());
     }
 
     unmount(NEXTROOT, UnmountFlags::DETACH).context("Unmounting nextroot")?;
 
-    println!("Cleared soft reboot queued state");
+    cli_status!("Cleared soft reboot queued state");
 
     Ok(())
 }
@@ -133,7 +133,7 @@ pub(crate) async fn prepare_soft_reboot_composefs(
 
     setup_root(args)?;
 
-    println!("Soft reboot setup complete");
+    cli_status!("Soft reboot setup complete");
 
     if reboot {
         // Replacing the current process should be fine as we restart userspace anyway

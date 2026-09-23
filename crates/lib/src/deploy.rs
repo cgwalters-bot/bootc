@@ -561,7 +561,7 @@ pub(crate) async fn prepare_for_pull(
     }
     let prep = match imp.prepare().await? {
         PrepareResult::AlreadyPresent(c) => {
-            println!("No changes in {imgref:#} => {}", c.manifest_digest);
+            cli_status!("No changes in {imgref:#} => {}", c.manifest_digest);
             return Ok(PreparedPullResult::AlreadyPresent(Box::new((*c).into())));
         }
         PrepareResult::Ready(p) => p,
@@ -658,7 +658,7 @@ pub(crate) async fn prepare_for_pull_unified(
     }
     let prep = match imp.prepare().await? {
         PrepareResult::AlreadyPresent(c) => {
-            println!("No changes in {imgref:#} => {}", c.manifest_digest);
+            cli_status!("No changes in {imgref:#} => {}", c.manifest_digest);
             return Ok(PreparedPullResult::AlreadyPresent(Box::new((*c).into())));
         }
         PrepareResult::Ready(p) => p,
@@ -993,9 +993,11 @@ pub(crate) async fn cleanup(sysroot: &Storage) -> Result<()> {
                 ostree_container::deploy::prune(locked_sysroot).context("Pruning images")?;
             if !pruned.is_empty() {
                 let size = glib::format_size(pruned.objsize);
-                println!(
+                cli_status!(
                     "Pruned images: {} (layers: {}, objsize: {})",
-                    pruned.n_images, pruned.n_layers, size
+                    pruned.n_images,
+                    pruned.n_layers,
+                    size
                 );
             } else {
                 tracing::debug!("Nothing to prune");
@@ -1276,15 +1278,15 @@ pub(crate) async fn stage(
     crate::deploy::cleanup(sysroot).await?;
 
     if !lock_finalization {
-        println!("Queued for next boot: {:#}", spec.image);
+        cli_status!("Queued for next boot: {:#}", spec.image);
     } else {
-        println!("Staged but not queued for next boot: {:#}", spec.image);
+        cli_status!("Staged but not queued for next boot: {:#}", spec.image);
     }
 
     if let Some(version) = image.version.as_deref() {
-        println!("  Version: {version}");
+        cli_status!("  Version: {version}");
     }
-    println!("  Digest: {}", image.manifest_digest);
+    cli_status!("  Digest: {}", image.manifest_digest);
 
     subtask.completed = true;
     subtasks.push(subtask.clone());
@@ -1341,7 +1343,7 @@ pub(crate) async fn rollback(sysroot: &Storage) -> Result<()> {
 
     let reverting = new_spec.boot_order == BootOrder::Default;
     if reverting {
-        println!("notice: Reverting queued rollback state");
+        cli_status!("notice: Reverting queued rollback state");
     }
     let rollback_status = host
         .status
@@ -1386,9 +1388,9 @@ pub(crate) async fn rollback(sysroot: &Storage) -> Result<()> {
         .sysroot
         .write_deployments(&new_deployments, gio::Cancellable::NONE)?;
     if reverting {
-        println!("Next boot: current deployment");
+        cli_status!("Next boot: current deployment");
     } else {
-        println!("Next boot: rollback deployment");
+        cli_status!("Next boot: rollback deployment");
     }
 
     write_reboot_required(rollback_image.manifest_digest.as_ref())?;
@@ -1550,7 +1552,7 @@ pub(crate) fn fixup_etc_fstab(root: &Dir) -> Result<()> {
     })
     .context("Replacing /etc/fstab")?;
 
-    println!("Updated /etc/fstab to add `ro` for `/`");
+    cli_status!("Updated /etc/fstab to add `ro` for `/`");
     Ok(())
 }
 

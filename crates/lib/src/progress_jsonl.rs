@@ -248,7 +248,7 @@ impl ProgressWriter {
     /// Send an event.
     pub(crate) async fn send(&self, event: Event<'_>) {
         if let Err(e) = self.send_impl(event, true).await {
-            eprintln!("Failed to write to jsonl: {e}");
+            cli_warn!("Failed to write to jsonl: {e}");
             // Stop writing to fd but let process continue
             // SAFETY: Propagating panics from the mutex here is intentional
             let _ = self.inner.lock().await.take();
@@ -258,7 +258,7 @@ impl ProgressWriter {
     /// Send an event that can be dropped.
     pub(crate) async fn send_lossy(&self, event: Event<'_>) {
         if let Err(e) = self.send_impl(event, false).await {
-            eprintln!("Failed to write to jsonl: {e}");
+            cli_warn!("Failed to write to jsonl: {e}");
             // Stop writing to fd but let process continue
             // SAFETY: Propagating panics from the mutex here is intentional
             let _ = self.inner.lock().await.take();

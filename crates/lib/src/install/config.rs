@@ -305,7 +305,7 @@ pub(crate) fn load_config() -> Result<Option<InstallConfiguration>> {
         })
         .with_context(|| format!("Parsing {path:?}"))?;
         for key in unused {
-            eprintln!("warning: {path:?}: Unknown key {key}");
+            cli_warn!("warning: {path:?}: Unknown key {key}");
         }
         if let Some(config) = config.as_mut() {
             if let Some(install) = c.install {

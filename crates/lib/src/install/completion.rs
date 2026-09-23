@@ -221,7 +221,7 @@ pub(crate) async fn run_from_anaconda(rootfs: &Dir) -> Result<()> {
         .try_exists(RUN_BOOTC_INSTALL_RECONCILED)
         .context("Querying reconciliation")?
     {
-        println!("Reconciliation already completed.");
+        cli_status!("Reconciliation already completed.");
         return Ok(());
     }
 

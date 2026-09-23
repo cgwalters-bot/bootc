@@ -168,7 +168,7 @@ fn mkfs<'a>(
 }
 
 pub(crate) fn wipefs(dev: &Utf8Path) -> Result<()> {
-    println!("Wiping device {dev}");
+    cli_status!("Wiping device {dev}");
     Command::new("wipefs")
         .args(["-a", dev.as_str()])
         .run_inherited_with_cmd_context()
@@ -219,10 +219,10 @@ pub(crate) fn install_create_rootfs(
         let dev = &opts.device;
         for child in device.children.iter().flatten() {
             let child = child.path();
-            println!("Wiping {child}");
+            cli_status!("Wiping {child}");
             wipefs(Utf8Path::new(&child))?;
         }
-        println!("Wiping {dev}");
+        cli_status!("Wiping {dev}");
         wipefs(dev)?;
     } else if device.has_children() {
         anyhow::bail!(
@@ -252,11 +252,11 @@ pub(crate) fn install_create_rootfs(
     let serial = device.serial.as_deref().unwrap_or("<unknown>");
     let model = device.model.as_deref().unwrap_or("<unknown>");
     let discoverable = use_discoverable_partitions(state);
-    println!("Block setup: {block_setup}");
-    println!("       Size: {}", device.size);
-    println!("     Serial: {serial}");
-    println!("      Model: {model}");
-    println!(
+    cli_status!("Block setup: {block_setup}");
+    cli_status!("       Size: {}", device.size);
+    cli_status!("     Serial: {serial}");
+    cli_status!("      Model: {model}");
+    cli_status!(
         " Partitions: {}",
         if discoverable { "Discoverable" } else { "UUID" }
     );

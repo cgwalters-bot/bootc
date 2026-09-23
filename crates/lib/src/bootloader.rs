@@ -167,7 +167,7 @@ pub(crate) fn install_via_bootupd(
         "/"
     };
 
-    println!("Installing bootloader via bootupd");
+    cli_status!("Installing bootloader via bootupd");
 
     // Build the bootupctl arguments
     let mut bootupd_args: Vec<&str> = vec!["backend", "install"];
@@ -269,7 +269,7 @@ pub(crate) fn install_systemd_boot(
     configopts: &crate::install::InstallConfigOpts,
     autoenroll: Option<SecurebootKeys>,
 ) -> Result<()> {
-    println!("Installing bootloader via systemd-boot");
+    cli_status!("Installing bootloader via systemd-boot");
 
     // We use the --root of the mounted target root, so we have the right /etc/os-release.
     let root_path = prepared_root
@@ -347,7 +347,7 @@ pub(crate) fn install_systemd_boot(
             }
             dir.copy(filename, &keys_dir, filename)
                 .with_context(|| format!("Copying secure boot key {filename:?}"))?;
-            println!(
+            cli_status!(
                 "Wrote Secure Boot key: {}/{}",
                 keys_path.display(),
                 filename.as_str()
@@ -452,7 +452,7 @@ pub(crate) fn install_via_zipl(device: &bootc_blockdev::Device, boot_uuid: &str)
     let ramdisk = boot_dir.join(initrd).canonicalize_utf8()?;
 
     // Execute the zipl command to install bootloader
-    println!("Running zipl on {device_path}");
+    cli_status!("Running zipl on {device_path}");
     Command::new("zipl")
         .args(["--target", boot_dir.as_str()])
         .args(["--image", image.as_str()])

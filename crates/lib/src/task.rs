@@ -97,11 +97,11 @@ impl Task {
         match self.verbosity {
             CmdVerbosity::Quiet => {}
             CmdVerbosity::Description => {
-                println!("{}", self.description);
+                cli_status!("{}", self.description);
             }
             CmdVerbosity::Verbose => {
                 // Output the description first
-                println!("{}", self.description);
+                cli_status!("{}", self.description);
 
                 // Lock stdout so we buffer
                 let mut stdout = std::io::stdout().lock();

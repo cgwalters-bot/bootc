@@ -237,7 +237,7 @@ pub(crate) async fn composefs_rollback(
 
     let reverting = new_spec.boot_order == BootOrder::Default;
     if reverting {
-        println!("notice: Reverting queued rollback state");
+        cli_status!("notice: Reverting queued rollback state");
     }
 
     let rollback_status = host
@@ -269,9 +269,9 @@ pub(crate) async fn composefs_rollback(
     }
 
     if reverting {
-        println!("Next boot: current deployment");
+        cli_status!("Next boot: current deployment");
     } else {
-        println!("Next boot: rollback deployment");
+        cli_status!("Next boot: rollback deployment");
     }
 
     Ok(())

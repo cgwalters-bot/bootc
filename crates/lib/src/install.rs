@@ -944,7 +944,7 @@ async fn initialize_ostree_root(state: &State, root_setup: &RootSetup) -> Result
             .cwd(rootfs_dir)?
             .run()?;
     } else {
-        println!("Reusing extant ostree layout");
+        cli_status!("Reusing extant ostree layout");
 
         let path = ".".into();
         let _ = crate::utils::open_dir_remount_rw(rootfs_dir, path)
@@ -1445,7 +1445,7 @@ pub(crate) fn reexecute_self_for_selinux_if_needed(
         let host_selinux = crate::lsm::host_selinux_enabled()?;
         tracing::debug!("Target has SELinux, host={host_selinux}");
         let r = if override_disable_selinux {
-            println!("notice: Target has SELinux enabled, overriding to disable");
+            cli_status!("notice: Target has SELinux enabled, overriding to disable");
             SELinuxFinalState::ForceTargetDisabled
         } else if host_selinux {
             // /sys/fs/selinuxfs is not normally mounted, so we do that now.
@@ -1764,9 +1764,9 @@ async fn prepare_install(
     let selinux_state = reexecute_self_for_selinux_if_needed(&source, config_opts.disable_selinux)?;
     tracing::debug!("SELinux state: {selinux_state:?}");
 
-    println!("Installing image: {:#}", &target_imgref);
+    cli_status!("Installing image: {:#}", &target_imgref);
     if let Some(digest) = source.digest.as_deref() {
-        println!("Digest: {digest}");
+        cli_status!("Digest: {digest}");
     }
 
     let root_filesystem = target_fs
@@ -1891,7 +1891,7 @@ impl PostFetchState {
                 }
             }
         };
-        println!("Bootloader: {detected_bootloader}");
+        cli_status!("Bootloader: {detected_bootloader}");
         let r = Self {
             detected_bootloader,
         };
@@ -2204,7 +2204,7 @@ async fn install_to_filesystem_impl(
 }
 
 fn installation_complete() {
-    println!("Installation complete!");
+    cli_status!("Installation complete!");
 }
 
 /// Implementation of the `bootc install to-disk` CLI command.
@@ -2512,12 +2512,12 @@ fn warn_on_host_root(rootfs_fd: &Dir) -> Result<()> {
     }
     let dashes = "----------------------------";
     let timeout = Duration::from_secs(DELAY_SECONDS);
-    eprintln!("{dashes}");
+    cli_warn!("{dashes}");
     crate::utils::medium_visibility_warning(
         "WARNING: This operation will OVERWRITE THE BOOTED HOST ROOT FILESYSTEM and is NOT REVERSIBLE.",
     );
-    eprintln!("Waiting {timeout:?} to continue; interrupt (Control-C) to cancel.");
-    eprintln!("{dashes}");
+    cli_warn!("Waiting {timeout:?} to continue; interrupt (Control-C) to cancel.");
+    cli_warn!("{dashes}");
 
     let bar = indicatif::ProgressBar::new_spinner();
     bar.enable_steady_tick(Duration::from_millis(100));
@@ -2657,7 +2657,7 @@ pub(crate) async fn install_to_filesystem(
     match fsopts.replace {
         Some(ReplaceMode::Wipe) => {
             let rootfs_fd = rootfs_fd.try_clone()?;
-            println!("Wiping contents of root");
+            cli_status!("Wiping contents of root");
             tokio::task::spawn_blocking(move || remove_all_in_dir_no_xdev(&rootfs_fd, true))
                 .await??;
         }

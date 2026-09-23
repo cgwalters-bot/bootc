@@ -423,8 +423,8 @@ pub(crate) async fn apply_upgrade_from_downloaded(
 
     // Staged deployment exists, but it will be finalized
     if !staged.download_only {
-        println!("Staged deployment is present and not in download only mode.");
-        println!("Use `bootc update --apply` to apply the update.");
+        cli_status!("Staged deployment is present and not in download only mode.");
+        cli_status!("Use `bootc update --apply` to apply the update.");
         return Ok(());
     }
 
@@ -541,7 +541,7 @@ pub(crate) async fn upgrade_composefs(
                 return crate::reboot::reboot();
             }
 
-            println!("Update already staged. To apply update run `bootc update --apply`");
+            cli_status!("Update already staged. To apply update run `bootc update --apply`");
 
             return Ok(());
         }
@@ -566,7 +566,7 @@ pub(crate) async fn upgrade_composefs(
 
             match action {
                 UpdateAction::Skip => {
-                    println!("No changes in staged image: {booted_imgref:#}");
+                    cli_status!("No changes in staged image: {booted_imgref:#}");
                     return Ok(());
                 }
 
@@ -598,7 +598,7 @@ pub(crate) async fn upgrade_composefs(
 
         match action {
             UpdateAction::Skip => {
-                println!("No changes in: {booted_imgref:#}");
+                cli_status!("No changes in: {booted_imgref:#}");
                 return Ok(());
             }
 

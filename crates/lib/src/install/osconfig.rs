@@ -46,7 +46,7 @@ pub(crate) fn inject_root_ssh_authorized_keys(
         |w| w.write_all(tmpfiles_content.as_bytes()).map_err(Into::into),
     )?;
 
-    println!("Injected: {ETC_TMPFILES}/{ROOT_SSH_TMPFILE}");
+    cli_status!("Injected: {ETC_TMPFILES}/{ROOT_SSH_TMPFILE}");
     Ok(())
 }
 
