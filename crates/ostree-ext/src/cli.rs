@@ -177,8 +177,10 @@ pub(crate) enum ContainerOpts {
         contentmeta: Option<Utf8PathBuf>,
     },
 
-    /// Perform build-time checking and canonicalization.
-    /// This is presently an optional command, but may become required in the future.
+    /// Does nothing; kept only so that existing container builds keep working.
+    ///
+    /// It can safely be removed from Containerfiles. Use `bootc container lint`
+    /// to check an image.
     Commit,
 
     /// Commands for working with (possibly layered, non-encapsulated) container images.
@@ -1049,7 +1051,7 @@ async fn run_from_opt(opt: Opt) -> Result<()> {
         Opt::Tar(TarOpts::Export(ref opt)) => tar_export(opt),
         Opt::Container(o) => match o {
             ContainerOpts::Info { imgref } => container_info(&imgref).await,
-            ContainerOpts::Commit => container_commit().await,
+            ContainerOpts::Commit => container_commit(std::io::stderr().lock()),
             ContainerOpts::Unencapsulate {
                 repo,
                 imgref,

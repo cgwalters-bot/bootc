@@ -1,8 +1,7 @@
-//! This module contains the functions to implement the commit
-//! procedures as part of building an ostree container image.
+//! Helpers to clean up transient content in a root filesystem, and the
+//! (now no-op) `ostree container commit` command.
 //! <https://github.com/ostreedev/ostree-rs-ext/issues/159>
 
-use crate::container_utils::require_ostree_container;
 use anyhow::Context;
 use anyhow::Result;
 use cap_std::fs::Dir;
@@ -11,7 +10,6 @@ use cap_std_ext::cap_std;
 use cap_std_ext::dirext::CapStdExtDirExt;
 use std::path::Path;
 use std::path::PathBuf;
-use tokio::task;
 
 /// Directories for which we will always remove all content.
 const FORCE_CLEAN_PATHS: &[&str] = &["run", "tmp", "var/tmp", "var/cache"];
@@ -85,29 +83,35 @@ fn clean_paths_in(root: &Dir, rootdev: u64) -> Result<()> {
     Ok(())
 }
 
-/// Given a root filesystem, clean out empty directories and warn about
-/// files in /var.  /run, /tmp, and /var/tmp have their contents recursively cleaned.
+/// Given a root filesystem, recursively remove the contents of /run, /tmp,
+/// /var/tmp and /var/cache, without crossing into other mounts.
 pub fn prepare_ostree_commit_in(root: &Dir) -> Result<()> {
     let rootdev = root.dir_metadata()?.dev();
     clean_paths_in(root, rootdev)
 }
 
-/// Like [`prepare_ostree_commit_in`] but only emits warnings about unsupported
-/// files in `/var` and will not error.
+/// Currently identical to [`prepare_ostree_commit_in`]; kept for API compatibility.
 pub fn prepare_ostree_commit_in_nonstrict(root: &Dir) -> Result<()> {
     let rootdev = root.dir_metadata()?.dev();
     clean_paths_in(root, rootdev)
 }
 
-/// Entrypoint to the commit procedures, initially we just
-/// have one validation but we expect more in the future.
-pub(crate) async fn container_commit() -> Result<()> {
-    task::spawn_blocking(move || {
-        require_ostree_container()?;
-        let rootdir = Dir::open_ambient_dir("/", cap_std::ambient_authority())?;
-        prepare_ostree_commit_in(&rootdir)
-    })
-    .await?
+/// Printed by `ostree container commit`, which intentionally does nothing.
+const CONTAINER_COMMIT_NOOP_MSG: &str = "note: `ostree container commit` is no longer needed and \
+     can be removed from container builds. It no longer cleans /var/cache, /var/tmp or /tmp; \
+     use `dnf clean all` or `RUN --mount=type=cache,target=/var/cache/...` to keep images \
+     small, and `bootc container lint` to check the image.";
+
+/// Implementation of `ostree container commit`, which is a no-op.
+///
+/// This used to clean out a few transient directories, but that was never
+/// needed for correctness, and `bootc container lint` is the tool for
+/// checking container images. It still exists and succeeds so that existing
+/// container builds keep working, but prints a note that it can be dropped.
+pub(crate) fn container_commit(mut out: impl std::io::Write) -> Result<()> {
+    writeln!(out, "{CONTAINER_COMMIT_NOOP_MSG}")
+        .context("Writing ostree container commit notice")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -175,6 +179,26 @@ mod tests {
         assert!(td.try_exists(var)?);
         assert!(td.try_exists(nested)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn container_commit_is_noop() -> Result<()> {
+        // Works anywhere, not only in an ostree container, and only prints a note.
+        let mut out = Vec::new();
+        container_commit(&mut out)?;
+        let out = String::from_utf8(out)?;
+        assert_eq!(out, format!("{CONTAINER_COMMIT_NOOP_MSG}\n"));
+        // The note must tell users the cleanup is gone and what to do instead.
+        for needle in [
+            "no longer needed",
+            "no longer cleans /var/cache",
+            "dnf clean all",
+            "--mount=type=cache",
+            "bootc container lint",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in {out:?}");
+        }
         Ok(())
     }
 }
