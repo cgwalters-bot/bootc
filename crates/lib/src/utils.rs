@@ -181,6 +181,10 @@ pub(crate) fn medium_visibility_warning(s: &str) {
 /// with an automatic spinner to show that we're not blocked.
 /// Note that generally the called function should not output
 /// anything to stderr as this will interfere with the spinner.
+#[expect(
+    clippy::print_stderr,
+    reason = "fallback when the progress bar is hidden (no tty)"
+)]
 pub(crate) async fn async_task_with_spinner<F, T>(msg: &str, f: F) -> T
 where
     F: Future<Output = T>,

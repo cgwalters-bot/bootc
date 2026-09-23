@@ -2,3 +2,6 @@ disallowed-methods = [
   # https://github.com/rust-lang/rust-clippy/issues/13434#issuecomment-2484292914
   { path = "str::len", reason = "use <str>.as_bytes().len() instead" }
 ]
+
+# Printing from tests is fine; see the print_stdout deny in crates/lib
+allow-print-in-tests = true

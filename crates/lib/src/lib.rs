@@ -1,6 +1,12 @@
 // The internals docs are built with --document-private-items, so allow
 // linking to private items from module documentation.
 #![allow(rustdoc::private_intra_doc_links)]
+// Library code should not write to stdout/stderr behind the caller's back:
+// that can corrupt machine-readable output. Use `tracing` for diagnostics,
+// `ProgressWriter` for progress, or write to an explicit `impl Write`.
+// Human-facing status lines from CLI subcommands go through the
+// `cli_status!`/`cli_warn!` macros in `cli_output`.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 //! # Bootable container tool
 //!
