@@ -30,6 +30,8 @@ use std assert
 use tap.nu
 use bootc_testlib.nu
 
+const IMAGE_B = "localhost/bootc-shadow-fixup-b"
+
 # Image B: has a sysusers.d entry for testbootcgroup so that systemd-sysusers
 # will try to create the group on boot.  Crucially, /etc/gshadow is NOT touched
 # here — the stale entry lives only in the running system's writable /etc
@@ -59,13 +61,23 @@ def initial_build [] {
     # On UKI composefs the derived image needs a sealed UKI; make_uki_containerfile
     # appends the necessary build stages when running on a UKI system.
     (tap make_uki_containerfile $DOCKERFILE_B) | save --force Dockerfile
-    podman build -t localhost/bootc-shadow-fixup-b .
+    podman build -t $IMAGE_B .
 
-    bootc switch --transport containers-storage localhost/bootc-shadow-fixup-b
+    bootc switch --transport containers-storage $IMAGE_B
     bootc_testlib reboot
 }
 
 def second_boot [] {
+    # Everything below assumes we booted Image B.  If bootc-finalize-staged
+    # failed during shutdown we come back up in the previous deployment, where
+    # sysusers has nothing to do and the group checks would fail misleadingly;
+    # show why finalization failed instead.
+    let booted = (bootc status --json | from json).status.booted.image.image.image
+    if $booted != $IMAGE_B {
+        ^journalctl -b -1 -u bootc-finalize-staged.service --no-pager | print
+    }
+    assert equal $booted $IMAGE_B "staged deployment was not applied on reboot"
+
     # systemctl show -P ActiveState always exits 0 and prints a plain string.
     let active_state = (^systemctl show -P ActiveState bootc-sysusers-shadow-sync.service | str trim)
 
