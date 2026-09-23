@@ -5,6 +5,13 @@ use std::{io::Write, process::Command};
 use bootc_utils::CommandRunExt;
 use fn_error_context::context;
 
+/// Make `systemctl` check for shutdown inhibitor locks and logged-in
+/// (non-root) users even though we are root and not on a tty; by default
+/// it only does so for interactive invocations. This avoids e.g. an
+/// automatic update rebooting the system while something has explicitly
+/// asked for it not to be shut down.
+const SYSTEMCTL_CHECK_INHIBITORS: &str = "--check-inhibitors=yes";
+
 /// Initiate a system reboot.
 /// This function will only return in case of error.
 #[context("Initiating reboot")]
@@ -24,6 +31,7 @@ pub(crate) fn reboot() -> anyhow::Result<()> {
             "--",
             "systemctl",
             "reboot",
+            SYSTEMCTL_CHECK_INHIBITORS,
             "--message=Initiated by bootc",
         ])
         .run_capture_stderr()?;

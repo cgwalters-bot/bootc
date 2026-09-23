@@ -119,6 +119,10 @@ pub(crate) struct UpgradeOpts {
     /// Restart or reboot into the new target image.
     ///
     /// Currently, this always reboots. Future versions may support userspace-only restart.
+    ///
+    /// The reboot is refused if a shutdown inhibitor is held, or if a non-root
+    /// user (including one who invoked this via sudo) is logged in; see
+    /// `systemctl reboot --check-inhibitors=yes`.
     #[clap(long, conflicts_with = "check")]
     pub(crate) apply: bool,
 
@@ -152,6 +156,10 @@ pub(crate) struct SwitchOpts {
     /// Restart or reboot into the new target image.
     ///
     /// Currently, this always reboots. Future versions may support userspace-only restart.
+    ///
+    /// The reboot is refused if a shutdown inhibitor is held, or if a non-root
+    /// user (including one who invoked this via sudo) is logged in; see
+    /// `systemctl reboot --check-inhibitors=yes`.
     #[clap(long)]
     pub(crate) apply: bool,
 
@@ -219,6 +227,10 @@ pub(crate) struct RollbackOpts {
     /// Currently, this option always reboots.  In the future this command
     /// will detect the case where no kernel changes are queued, and perform
     /// a userspace-only restart.
+    ///
+    /// The reboot is refused if a shutdown inhibitor is held, or if a non-root
+    /// user (including one who invoked this via sudo) is logged in; see
+    /// `systemctl reboot --check-inhibitors=yes`.
     #[clap(long)]
     pub(crate) apply: bool,
 
