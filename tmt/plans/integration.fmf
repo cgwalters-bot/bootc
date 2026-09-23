@@ -318,4 +318,11 @@ execute:
     test:
       - /tmt/tests/tests/test-48-composefs-uki-dumpfile
   extra-skip_if_ostree: true
+
+/plan-49-switch-zstd-chunked:
+  summary: Switch to an image with zstd:chunked compressed layers
+  discover:
+    how: fmf
+    test:
+      - /tmt/tests/tests/test-49-switch-zstd-chunked
 # END GENERATED PLANS
