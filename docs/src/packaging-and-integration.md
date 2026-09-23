@@ -105,6 +105,18 @@ To explicitly control features:
 make all CARGO_FEATURES="rhsm"
 ```
 
+The `selinux` feature is enabled by default and links against libselinux.
+Distributions that do not use SELinux (and may not ship libselinux) can
+disable it by turning off default features and re-enabling the other
+defaults (`install-to-disk` from `crates/lib` and `pre-6.15` from
+`crates/initramfs`). bootc then behaves as if SELinux were disabled for
+its own process. The Makefile targets always use the default features,
+so invoke cargo directly:
+
+```bash
+cargo build --release --no-default-features --features install-to-disk,pre-6.15 --bins
+```
+
 ## Integration Testing
 
 For distributions that want to include integration tests, use:
