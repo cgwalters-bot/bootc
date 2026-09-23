@@ -107,15 +107,16 @@ make all CARGO_FEATURES="rhsm"
 
 The `selinux` feature is enabled by default and links against libselinux.
 Distributions that do not use SELinux (and may not ship libselinux) can
-disable it by turning off default features and re-enabling the other
-defaults (`install-to-disk` from `crates/lib` and `pre-6.15` from
-`crates/initramfs`). bootc then behaves as if SELinux were disabled for
-its own process. The Makefile targets always use the default features,
-so invoke cargo directly:
+build without the default features and add back the others they want
+(`pre-6.15` is only needed to boot composefs systems on kernels older
+than 6.15). bootc then behaves as if SELinux were disabled:
 
 ```bash
-cargo build --release --no-default-features --features install-to-disk,pre-6.15 --bins
+make bin CARGO_NO_DEFAULT_FEATURES=1 CARGO_FEATURES="install-to-disk pre-6.15"
 ```
+
+Note that libostree may still link libselinux itself, depending on how it
+was built.
 
 ## Integration Testing
 
