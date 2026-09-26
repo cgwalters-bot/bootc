@@ -818,8 +818,23 @@ pub(crate) fn setup_composefs_bls_boot(
             let root_dev = bootc_blockdev::list_dev_by_dir(&storage.physical_root)?;
             let esp_dev = root_dev.find_first_colocated_esp()?;
 
+            // With a separate boot filesystem, it's mounted at /boot of the
+            // booted root (see the systemd.mount-extra karg added at install
+            // time), not at /sysroot/boot, which is then just an empty
+            // directory on the physical root. Same as get_boot_dir_for_grub().
+            let root_path = if Dir::open_ambient_dir("/", ambient_authority())
+                .context("Opening root")?
+                .is_mountpoint("boot")
+                .context("Checking if /boot is a mountpoint")?
+                == Some(true)
+            {
+                "/"
+            } else {
+                "/sysroot"
+            };
+
             (
-                Utf8PathBuf::from("/sysroot"),
+                Utf8PathBuf::from(root_path),
                 esp_dev.path(),
                 cmdline,
                 bootloader,
