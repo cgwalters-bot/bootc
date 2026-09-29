@@ -291,8 +291,8 @@ fn read_regular_file(
     repo: &ComposefsRepository,
 ) -> Option<Vec<u8>> {
     match file {
-        RegularFile::External(object_id, _) | RegularFile::ExternalNoVerity(object_id, _) => {
-            repo.read_object(object_id).ok()
+        RegularFile::External(..) | RegularFile::ExternalPath { .. } => {
+            repo.read_object(&file.repo_object_id().ok()?).ok()
         }
         RegularFile::Inline(data) => Some(data.to_vec()),
         RegularFile::Sparse(_) => None,
@@ -1299,8 +1299,8 @@ fn write_pe_to_esp(
             // UKI/Addons would always be large enough to be an external object
             anyhow::bail!("File too small to be UKI/Addon")
         }
-        RegularFile::External(id, ..) | RegularFile::ExternalNoVerity(id, ..) => {
-            std::fs::File::from(repo.open_object(id)?)
+        RegularFile::External(..) | RegularFile::ExternalPath { .. } => {
+            std::fs::File::from(repo.open_object(&file.repo_object_id()?)?)
         }
         RegularFile::Sparse(..) => {
             anyhow::bail!("Sparse file cannot be a UKI/Addon")
@@ -1420,8 +1420,8 @@ pub(crate) fn boot_artifact_fsverity_policy(
         let cmdline = match entry {
             ComposefsBootEntry::Type2(entry) if matches!(entry.pe_type, PEType::Uki) => {
                 let mut reader = match &entry.file {
-                    RegularFile::External(id, ..) | RegularFile::ExternalNoVerity(id, ..) => {
-                        std::fs::File::from(repo.open_object(id)?)
+                    file @ (RegularFile::External(..) | RegularFile::ExternalPath { .. }) => {
+                        std::fs::File::from(repo.open_object(&file.repo_object_id()?)?)
                     }
                     RegularFile::Inline(..) | RegularFile::Sparse(..) => {
                         anyhow::bail!("UKI file is not a regular external object")
@@ -1474,8 +1474,8 @@ fn find_expected_composefs_digest(
             continue;
         }
         let mut uki_reader = match &entry.file {
-            RegularFile::External(id, ..) | RegularFile::ExternalNoVerity(id, ..) => {
-                std::fs::File::from(repo.open_object(id)?)
+            file @ (RegularFile::External(..) | RegularFile::ExternalPath { .. }) => {
+                std::fs::File::from(repo.open_object(&file.repo_object_id()?)?)
             }
             RegularFile::Inline(..) | RegularFile::Sparse(..) => {
                 anyhow::bail!("UKI file is not a regular external object")

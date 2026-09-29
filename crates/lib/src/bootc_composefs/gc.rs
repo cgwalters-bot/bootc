@@ -604,7 +604,10 @@ pub(crate) async fn composefs_gc(
         for line in boot_dump.lines() {
             let entry = Entry::parse(line).unwrap();
 
-            let Item::Regular { path, .. } = entry.item else {
+            let Item::Regular {
+                path: Some(path), ..
+            } = entry.item
+            else {
                 continue;
             };
 
